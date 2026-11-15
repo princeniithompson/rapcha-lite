@@ -18,3 +18,4 @@ Works on Android 7 and newer.
 ## For developers
 
 This is the full source. Build with `./gradlew assembleDebug`.
+New versions are built automatically when code is pushed to main.
