@@ -2,11 +2,6 @@
   <img src="docs/images/banner.jpg" alt="Rapcha — Voice typing for Android" width="920">
 </p>
 
-<h2 align="center">
-  <img src="docs/images/icon.png" width="72" height="72" alt="Rapcha icon" valign="middle">
-  Rapcha
-</h2>
-
 <p align="center">
   <a href="https://github.com/princeniithompson/rapcha-lite/releases/latest"><img src="https://img.shields.io/github/v/release/princeniithompson/rapcha-lite?label=version&style=flat-square&labelColor=EEF2F7&color=6B8499" alt="Latest version"></a>
   <a href="https://github.com/princeniithompson/rapcha-lite/releases/latest"><img src="https://img.shields.io/github/release-date/princeniithompson/rapcha-lite?label=updated&style=flat-square&labelColor=EEF2F7&color=6B8499" alt="Last updated"></a>
