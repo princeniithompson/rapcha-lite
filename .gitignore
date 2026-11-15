@@ -1,0 +1,46 @@
+# Gradle and build outputs
+.gradle/
+.kotlin/
+build/
+*/build/
+captures/
+.cxx/
+.externalNativeBuild/
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.DS_Store
+*.swp
+
+# Local machine / SDK path
+local.properties
+
+# Secrets and signing (never commit)
+.env
+.env.local
+*.jks
+*.keystore
+debug.keystore
+store.pass
+key.properties
+keystore.properties
+google-services.json
+
+# AI Studio / editor dumps
+.aistudio/
+public/assets/aistudio/
+
+# Tests and profiling
+*.hprof
+/app/src/test/screenshots/cleanup
+
+# OS
+Thumbs.db

@@ -1,0 +1,26 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="400"
+    android:viewportHeight="400">
+
+    <group
+        android:pivotX="200"
+        android:pivotY="200"
+        android:scaleX="0.62"
+        android:scaleY="0.62">
+
+        <group
+            android:translateX="-30"
+            android:translateY="-142.38">
+
+            <!-- Silhouette ring of the lifesaver ring for Android 13+ Themed Icons -->
+            <path
+                android:pathData="m230,152.38 c-104.93,0 -190,85.066 -190,190 s85.066,190 190,190 190,-85.066 190,-190 -85.066,-190 -190,-190 z m0,80 c60.751,0 110,49.249 110,110 s-49.249,110 -110,110 -110,-49.249 -110,-110 49.249,-110 110,-110 z"
+                android:fillColor="#000000"
+                android:fillType="evenOdd" />
+
+        </group>
+    </group>
+
+</vector>
