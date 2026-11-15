@@ -36,16 +36,17 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
@@ -63,8 +64,10 @@ import kotlin.math.sin
 
 /**
  * Page 1 Hero Welcome Screen:
- * Crash-free pure Compose animated ambient backdrop + curved scrolling sentence arc
- * over a pulsing voice waveform capsule, branded with Rapcha + Lifesaver ring.
+ * Low-overhead pure Compose animated ambient backdrop in Rapcha's lifebuoy red, white, and ash
+ * palette + curved scrolling sentence arc over a pulsing voice waveform capsule.
+ * Animation states are read exclusively in draw/graphicsLayer phases so low-end devices
+ * (e.g., Samsung Galaxy A15 / 3-4 GB RAM) never recompose or relayout per frame.
  */
 @Composable
 fun OnboardingHeroWelcomeScreen(
@@ -73,7 +76,7 @@ fun OnboardingHeroWelcomeScreen(
 ) {
     val infiniteTransition = rememberInfiniteTransition(label = "hero_welcome_anim")
 
-    val ambientDrift by infiniteTransition.animateFloat(
+    val ambientDriftState = infiniteTransition.animateFloat(
         initialValue = 0f,
         targetValue = (2f * PI).toFloat(),
         animationSpec = infiniteRepeatable(
@@ -83,7 +86,7 @@ fun OnboardingHeroWelcomeScreen(
         label = "ambient_drift"
     )
 
-    val wavePhase by infiniteTransition.animateFloat(
+    val wavePhaseState = infiniteTransition.animateFloat(
         initialValue = 0f,
         targetValue = (2f * PI).toFloat(),
         animationSpec = infiniteRepeatable(
@@ -93,7 +96,7 @@ fun OnboardingHeroWelcomeScreen(
         label = "wave_phase"
     )
 
-    val marqueeCycle by infiniteTransition.animateFloat(
+    val marqueeCycleState = infiniteTransition.animateFloat(
         initialValue = 0f,
         targetValue = 3f,
         animationSpec = infiniteRepeatable(
@@ -103,7 +106,7 @@ fun OnboardingHeroWelcomeScreen(
         label = "marquee_cycle"
     )
 
-    val pillPulse by infiniteTransition.animateFloat(
+    val pillPulseState = infiniteTransition.animateFloat(
         initialValue = 0.94f,
         targetValue = 1.04f,
         animationSpec = infiniteRepeatable(
@@ -124,7 +127,7 @@ fun OnboardingHeroWelcomeScreen(
     BoxWithConstraints(
         modifier = modifier
             .fillMaxSize()
-            .background(Color(0xFF28475C))
+            .background(Color(0xFF23272E))
             .testTag("onboarding_hero_welcome_screen")
     ) {
         val screenW = maxWidth
@@ -169,69 +172,77 @@ fun OnboardingHeroWelcomeScreen(
         }
         val horizontalPadding = if (isTablet) 40.dp else 24.dp
 
-        // Full-bleed atmospheric animated canvas (zero video/codec crash risk)
-        Canvas(modifier = Modifier.fillMaxSize()) {
-            val w = size.width
-            val h = size.height
-
-            // Rich deep-sky to warm-amber atmospheric base gradient
-            drawRect(
-                brush = Brush.verticalGradient(
-                    colors = listOf(
-                        Color(0xFF234A63),
-                        Color(0xFF3E5260),
-                        Color(0xFF6B5349),
-                        Color(0xFF9C7A5C),
-                        Color(0xFF534034)
+        // Full-bleed atmospheric animated backdrop matching Rapcha's red, white & ash lifebuoy bubble
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .drawWithCache {
+                    val baseGradient = Brush.verticalGradient(
+                        colors = listOf(
+                            Color(0xFF1F2329),
+                            Color(0xFF3A3F47),
+                            Color(0xFF6B1E23),
+                            Color(0xFFA01820),
+                            Color(0xFF321215)
+                        )
                     )
-                )
-            )
-
-            // Soft organic warm drifting light glows
-            val warmX = w * (0.48f + 0.14f * cos(ambientDrift.toDouble()).toFloat())
-            val warmY = h * (0.46f + 0.08f * sin(ambientDrift.toDouble()).toFloat())
-            drawCircle(
-                brush = Brush.radialGradient(
-                    colors = listOf(
-                        Color(0xFFFDF0D5).copy(alpha = 0.65f),
-                        Color(0xFFD99B66).copy(alpha = 0.30f),
-                        Color.Transparent
-                    ),
-                    center = Offset(warmX, warmY),
-                    radius = w * 0.72f
-                ),
-                center = Offset(warmX, warmY),
-                radius = w * 0.72f
-            )
-
-            val lowerX = w * (0.38f - 0.12f * sin(ambientDrift.toDouble()).toFloat())
-            val lowerY = h * (0.68f + 0.06f * cos(ambientDrift.toDouble()).toFloat())
-            drawCircle(
-                brush = Brush.radialGradient(
-                    colors = listOf(
-                        Color(0xFFFFF4E0).copy(alpha = 0.55f),
-                        Color(0xFFB58059).copy(alpha = 0.25f),
-                        Color.Transparent
-                    ),
-                    center = Offset(lowerX, lowerY),
-                    radius = w * 0.68f
-                ),
-                center = Offset(lowerX, lowerY),
-                radius = w * 0.68f
-            )
-
-            // Subtle dark vignette at top and bottom for crisp white text & button legibility
-            drawRect(
-                brush = Brush.verticalGradient(
-                    colors = listOf(
-                        Color.Black.copy(alpha = 0.22f),
-                        Color.Transparent,
-                        Color.Transparent,
-                        Color.Black.copy(alpha = 0.32f)
+                    val vignetteGradient = Brush.verticalGradient(
+                        colors = listOf(
+                            Color.Black.copy(alpha = 0.24f),
+                            Color.Transparent,
+                            Color.Transparent,
+                            Color.Black.copy(alpha = 0.34f)
+                        )
                     )
-                )
-            )
-        }
+                    val upperGlowColors = listOf(
+                        Color(0xFFF3F4F6).copy(alpha = 0.42f),
+                        Color(0xFFD9232E).copy(alpha = 0.34f),
+                        Color.Transparent
+                    )
+                    val lowerGlowColors = listOf(
+                        Color(0xFFFFD6D6).copy(alpha = 0.36f),
+                        Color(0xFFB40016).copy(alpha = 0.32f),
+                        Color.Transparent
+                    )
+                    val w = size.width
+                    val h = size.height
+                    val upperRadius = w * 0.72f
+                    val lowerRadius = w * 0.68f
+
+                    onDrawBehind {
+                        drawRect(brush = baseGradient)
+
+                        val drift = ambientDriftState.value.toDouble()
+                        val upperX = w * (0.48f + 0.14f * cos(drift).toFloat())
+                        val upperY = h * (0.46f + 0.08f * sin(drift).toFloat())
+                        val upperCenter = Offset(upperX, upperY)
+                        drawCircle(
+                            brush = Brush.radialGradient(
+                                colors = upperGlowColors,
+                                center = upperCenter,
+                                radius = upperRadius
+                            ),
+                            center = upperCenter,
+                            radius = upperRadius
+                        )
+
+                        val lowerX = w * (0.38f - 0.12f * sin(drift).toFloat())
+                        val lowerY = h * (0.68f + 0.06f * cos(drift).toFloat())
+                        val lowerCenter = Offset(lowerX, lowerY)
+                        drawCircle(
+                            brush = Brush.radialGradient(
+                                colors = lowerGlowColors,
+                                center = lowerCenter,
+                                radius = lowerRadius
+                            ),
+                            center = lowerCenter,
+                            radius = lowerRadius
+                        )
+
+                        drawRect(brush = vignetteGradient)
+                    }
+                }
+        )
 
         // Foreground Safe Content
         Column(
@@ -284,6 +295,27 @@ fun OnboardingHeroWelcomeScreen(
             // Centerpiece: Curved Arc Marquee + Pulsing Voice Pill
             val density = LocalDensity.current
             val marqueePx = with(density) { marqueeFontSizeSp.toPx() }
+            val shadowVOffsetPx = with(density) { 1.5.dp.toPx() }
+            val boldTypeface = remember { Typeface.create(Typeface.DEFAULT, Typeface.BOLD) }
+            val marqueeTextPaint = remember(marqueePx, boldTypeface) {
+                Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = android.graphics.Color.WHITE
+                    textSize = marqueePx
+                    typeface = boldTypeface
+                }
+            }
+            val marqueeShadowPaint = remember(marqueePx, boldTypeface) {
+                Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = android.graphics.Color.BLACK
+                    textSize = marqueePx
+                    typeface = boldTypeface
+                }
+            }
+            val sentenceWidths = remember(marqueeSentences, marqueeTextPaint) {
+                FloatArray(marqueeSentences.size) { idx ->
+                    marqueeTextPaint.measureText(marqueeSentences[idx])
+                }
+            }
 
             Box(
                 modifier = Modifier
@@ -292,70 +324,77 @@ fun OnboardingHeroWelcomeScreen(
                     .widthIn(max = 680.dp),
                 contentAlignment = Alignment.Center
             ) {
-                // Curved scrolling sentence path
-                Canvas(
+                // Curved scrolling sentence path with cached Path & Paints (zero per-frame allocations/blurs)
+                Box(
                     modifier = Modifier
                         .fillMaxSize()
-                ) {
-                    val w = size.width
-                    val h = size.height
-                    val centerY = h * 0.44f
-                    val arcHeight = minOf(w * 0.20f, h * 0.24f)
+                        .drawWithCache {
+                            val w = size.width
+                            val h = size.height
+                            val centerY = h * 0.44f
+                            val arcHeight = minOf(w * 0.20f, h * 0.24f)
+                            val cachedArcPath = AndroidPath().apply {
+                                moveTo(-w * 0.35f, centerY + arcHeight)
+                                quadTo(
+                                    w * 0.50f,
+                                    centerY - arcHeight,
+                                    w * 1.35f,
+                                    centerY + arcHeight
+                                )
+                            }
+                            val pathLengthApprox = w * 1.78f
 
-                    val activeIndex = marqueeCycle.toInt().coerceIn(0, marqueeSentences.lastIndex)
-                    val localProgress = marqueeCycle - activeIndex
-                    val sentence = marqueeSentences[activeIndex]
+                            onDrawBehind {
+                                val cycle = marqueeCycleState.value
+                                val activeIndex = cycle.toInt().coerceIn(0, marqueeSentences.lastIndex)
+                                val localProgress = cycle - activeIndex
+                                val sentence = marqueeSentences[activeIndex]
+                                val textWidth = sentenceWidths[activeIndex]
 
-                    val path = AndroidPath().apply {
-                        moveTo(-w * 0.35f, centerY + arcHeight)
-                        quadTo(
-                            w * 0.50f,
-                            centerY - arcHeight,
-                            w * 1.35f,
-                            centerY + arcHeight
-                        )
-                    }
+                                val alphaFade = when {
+                                    localProgress < 0.12f -> localProgress / 0.12f
+                                    localProgress > 0.88f -> (1f - localProgress) / 0.12f
+                                    else -> 1f
+                                }.coerceIn(0f, 1f)
 
-                    val alphaFade = when {
-                        localProgress < 0.12f -> localProgress / 0.12f
-                        localProgress > 0.88f -> (1f - localProgress) / 0.12f
-                        else -> 1f
-                    }.coerceIn(0f, 1f)
+                                val startOffset = pathLengthApprox * 0.72f -
+                                    (localProgress * (pathLengthApprox * 0.48f + textWidth * 0.55f))
 
-                    val textPaint = Paint().apply {
-                        isAntiAlias = true
-                        color = android.graphics.Color.argb(
-                            (alphaFade * 245).toInt().coerceIn(0, 255),
-                            255,
-                            255,
-                            255
-                        )
-                        textSize = marqueePx
-                        typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-                        setShadowLayer(8f, 0f, 2f, android.graphics.Color.argb(95, 0, 0, 0))
-                    }
+                                marqueeShadowPaint.alpha = (alphaFade * 88f).toInt().coerceIn(0, 255)
+                                marqueeTextPaint.alpha = (alphaFade * 245f).toInt().coerceIn(0, 255)
 
-                    val textWidth = textPaint.measureText(sentence)
-                    val pathLengthApprox = w * 1.78f
-                    val startOffset = pathLengthApprox * 0.72f - (localProgress * (pathLengthApprox * 0.48f + textWidth * 0.55f))
+                                val nativeCanvas = drawContext.canvas.nativeCanvas
+                                nativeCanvas.drawTextOnPath(
+                                    sentence,
+                                    cachedArcPath,
+                                    startOffset,
+                                    shadowVOffsetPx,
+                                    marqueeShadowPaint
+                                )
+                                nativeCanvas.drawTextOnPath(
+                                    sentence,
+                                    cachedArcPath,
+                                    startOffset,
+                                    0f,
+                                    marqueeTextPaint
+                                )
+                            }
+                        }
+                )
 
-                    drawContext.canvas.nativeCanvas.drawTextOnPath(
-                        sentence,
-                        path,
-                        startOffset,
-                        0f,
-                        textPaint
-                    )
-                }
-
-                // Centered Frosted Voice Waveform Capsule
+                // Centered Frosted Voice Waveform Capsule (fixed size + GPU scale via graphicsLayer = 0 relayouts)
                 Surface(
                     shape = RoundedCornerShape(50),
                     color = Color.White.copy(alpha = 0.18f),
                     border = BorderStroke(2.dp, Color.White.copy(alpha = 0.92f)),
                     modifier = Modifier
                         .padding(top = if (isCompactHeight) 36.dp else 54.dp)
-                        .size(width = pillWidth * pillPulse, height = pillHeight * pillPulse)
+                        .size(width = pillWidth, height = pillHeight)
+                        .graphicsLayer {
+                            val scale = pillPulseState.value
+                            scaleX = scale
+                            scaleY = scale
+                        }
                 ) {
                     Canvas(modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 12.dp)) {
                         val barCount = 15
@@ -363,18 +402,22 @@ fun OnboardingHeroWelcomeScreen(
                         val slotW = totalW / barCount
                         val barW = slotW * 0.44f
                         val centerY = size.height / 2f
+                        val wavePhase = wavePhaseState.value
+                        val minBarH = 4.dp.toPx()
+                        val barColor = Color.White.copy(alpha = 0.95f)
+                        val barRadius = CornerRadius(barW / 2f, barW / 2f)
 
                         for (i in 0 until barCount) {
                             val normDist = kotlin.math.abs((i - (barCount - 1) / 2f) / ((barCount - 1) / 2f))
                             val envelope = 1f - (normDist * 0.62f)
                             val wave = (0.48f + 0.52f * sin((wavePhase + i * 0.65f).toDouble()).toFloat())
-                            val barH = (size.height * 0.80f * envelope * wave).coerceAtLeast(4.dp.toPx())
+                            val barH = (size.height * 0.80f * envelope * wave).coerceAtLeast(minBarH)
                             val x = i * slotW + (slotW - barW) / 2f
                             drawRoundRect(
-                                color = Color.White.copy(alpha = 0.95f),
+                                color = barColor,
                                 topLeft = Offset(x, centerY - barH / 2f),
                                 size = Size(barW, barH),
-                                cornerRadius = CornerRadius(barW / 2f, barW / 2f)
+                                cornerRadius = barRadius
                             )
                         }
                     }
@@ -412,7 +455,7 @@ fun OnboardingHeroWelcomeScreen(
                 onClick = onGetStarted,
                 shape = RoundedCornerShape(14.dp),
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = Color(0xFFEDE8FF),
+                    containerColor = Color.White,
                     contentColor = Color(0xFF141218)
                 ),
                 modifier = Modifier
