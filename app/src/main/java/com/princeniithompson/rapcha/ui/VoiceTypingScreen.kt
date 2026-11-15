@@ -125,6 +125,8 @@ fun VoiceTypingScreen(
     val customApiKey by viewModel.customApiKey.collectAsState()
     val provisionedApiKey by viewModel.provisionedApiKey.collectAsState()
     val signedInGoogleEmail by viewModel.signedInGoogleEmail.collectAsState()
+    val isApiKeyVerified by viewModel.isApiKeyVerified.collectAsState()
+    val apiKeyErrorReason by viewModel.apiKeyErrorReason.collectAsState()
     val vocabularyList by CustomVocabularyRepository.vocabulary.collectAsState()
     val isSmartMode by viewModel.isSmartMode.collectAsState()
     val activeChrome by FloatingBubbleManager.bubbleChrome.collectAsState()
@@ -213,11 +215,22 @@ fun VoiceTypingScreen(
     val isOnboardingCompleted by viewModel.isOnboardingCompleted.collectAsState()
     var showOnboardingManual by remember { mutableStateOf(false) }
 
+    LaunchedEffect(isOnboardingCompleted, apiKeyConfigured, isApiKeyVerified, apiKeyErrorReason) {
+        if (isOnboardingCompleted && apiKeyConfigured && isApiKeyVerified && apiKeyErrorReason.isBlank()) {
+            automationEngine.tearDownWebView()
+        } else if (isOnboardingCompleted && apiKeyConfigured && !isApiKeyVerified && apiKeyErrorReason.isBlank()) {
+            viewModel.verifyCurrentApiKeyIfNeeded()
+        }
+    }
+
     if (!isOnboardingCompleted || showOnboardingManual) {
         com.princeniithompson.rapcha.ui.screens.onboarding.OnboardingScreen(
             viewModel = viewModel,
             onFinishOnboarding = {
                 showOnboardingManual = false
+                if (viewModel.hasWorkingVerifiedKey()) {
+                    automationEngine.tearDownWebView()
+                }
             },
             sharedAutomationEngine = automationEngine
         )
@@ -247,13 +260,13 @@ fun VoiceTypingScreen(
     val hasOverlayPermission = hasOverlayPermissionFlow || viewModel.canDrawOverlays()
 
     Box(modifier = modifier.fillMaxSize()) {
-        if (activeWebView != null && (
-                provisioningState.showBrowserToUser ||
-                    provisioningState.status == ProvisioningStatus.PROVISIONING_BACKGROUND ||
+        val needsKeyProvisioning = !apiKeyConfigured || !isApiKeyVerified || apiKeyErrorReason.isNotBlank()
+        if (activeWebView != null && (provisioningState.showBrowserToUser || (needsKeyProvisioning && (
+                provisioningState.status == ProvisioningStatus.PROVISIONING_BACKGROUND ||
                     provisioningState.status == ProvisioningStatus.SIGNED_IN_HANDOFF ||
                     provisioningState.status == ProvisioningStatus.SIGNING_IN ||
                     provisioningState.status == ProvisioningStatus.NEEDS_AUTH_RECONFIRM
-                )
+                )))
         ) {
             EmbeddedGoogleAuthBrowserContainer(
                 webView = activeWebView,
@@ -300,7 +313,7 @@ fun VoiceTypingScreen(
                             onAutoGetWithGoogle = {
                                 scope.launch {
                                     drawerState.close()
-                                    automationEngine.createOrReuseWebView()
+                                    automationEngine.createOrReuseWebView(forceRecovery = true)
                                     automationEngine.startGoogleSignIn()
                                 }
                             },
@@ -336,7 +349,8 @@ fun VoiceTypingScreen(
                             onGrantOverlay = openOverlaySettings,
                             onTurnOnAccessibility = { showAccessibilityDisclosure = true },
                             isSmartMode = isSmartMode,
-                            onSmartModeToggle = { viewModel.setSmartMode(it) }
+                            onSmartModeToggle = { viewModel.setSmartMode(it) },
+                            apiKeyErrorReason = apiKeyErrorReason
                         )
                     }
                 },
@@ -431,7 +445,8 @@ internal fun SettingsContent(
     onTurnOnAccessibility: () -> Unit,
     modifier: Modifier = Modifier,
     isSmartMode: Boolean = true,
-    onSmartModeToggle: (Boolean) -> Unit = {}
+    onSmartModeToggle: (Boolean) -> Unit = {},
+    apiKeyErrorReason: String = ""
 ) {
     Column(
         modifier = modifier
@@ -490,6 +505,7 @@ internal fun SettingsContent(
             apiKeyConfigured = apiKeyConfigured,
             signedInEmail = signedInEmail,
             isProvisioning = isProvisioning,
+            apiKeyErrorReason = apiKeyErrorReason,
             onSaveApiKey = onSaveApiKey,
             onAutoGetWithGoogle = onAutoGetWithGoogle
         )
@@ -717,10 +733,13 @@ internal fun SettingsApiKeyCard(
     signedInEmail: String,
     isProvisioning: Boolean,
     onSaveApiKey: (String) -> Unit,
-    onAutoGetWithGoogle: () -> Unit
+    onAutoGetWithGoogle: () -> Unit,
+    apiKeyErrorReason: String = ""
 ) {
     var draftKey by remember(apiKey) { mutableStateOf(apiKey) }
     var revealKey by remember { mutableStateOf(false) }
+    val hasError = apiKeyErrorReason.isNotBlank()
+    val isHealthy = apiKeyConfigured && !hasError
 
     Card(
         modifier = Modifier
@@ -729,7 +748,7 @@ internal fun SettingsApiKeyCard(
             .testTag("settings_api_key_card"),
         shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(
-            containerColor = if (apiKeyConfigured) {
+            containerColor = if (isHealthy) {
                 MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.35f)
             } else {
                 MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.35f)
@@ -737,7 +756,7 @@ internal fun SettingsApiKeyCard(
         ),
         border = BorderStroke(
             width = 1.dp,
-            color = if (apiKeyConfigured) {
+            color = if (isHealthy) {
                 MaterialTheme.colorScheme.primary.copy(alpha = 0.3f)
             } else {
                 MaterialTheme.colorScheme.error.copy(alpha = 0.45f)
@@ -763,7 +782,7 @@ internal fun SettingsApiKeyCard(
                     Icon(
                         imageVector = Icons.Filled.Key,
                         contentDescription = "Gemini API Key",
-                        tint = if (apiKeyConfigured) Color(0xFF059669) else MaterialTheme.colorScheme.error,
+                        tint = if (isHealthy) Color(0xFF059669) else MaterialTheme.colorScheme.error,
                         modifier = Modifier.size(18.dp)
                     )
                     Text(
@@ -774,17 +793,26 @@ internal fun SettingsApiKeyCard(
                 }
                 Text(
                     text = when {
+                        hasError -> "Key invalid"
                         apiKeyConfigured -> "Connected"
                         isProvisioning -> "Setting up..."
                         else -> "Required"
                     },
                     style = MaterialTheme.typography.labelMedium,
                     fontWeight = FontWeight.Bold,
-                    color = if (apiKeyConfigured) Color(0xFF059669) else MaterialTheme.colorScheme.error
+                    color = if (isHealthy) Color(0xFF059669) else MaterialTheme.colorScheme.error
                 )
             }
 
-            if (signedInEmail.isNotBlank()) {
+            if (hasError) {
+                Text(
+                    text = apiKeyErrorReason,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+            } else if (signedInEmail.isNotBlank()) {
                 Text(
                     text = "Google: $signedInEmail",
                     style = MaterialTheme.typography.bodySmall,
@@ -845,14 +873,18 @@ internal fun SettingsApiKeyCard(
                     ) {
                         Text("Clear", textAlign = TextAlign.Center)
                     }
-                } else {
+                }
+                if (!apiKeyConfigured || hasError) {
                     FilledTonalButton(
                         onClick = onAutoGetWithGoogle,
                         modifier = Modifier
                             .fillMaxWidth()
                             .testTag("settings_auto_get_key_button")
                     ) {
-                        Text("Get via Google", textAlign = TextAlign.Center)
+                        Text(
+                            text = if (hasError) "Refresh via Google" else "Get via Google",
+                            textAlign = TextAlign.Center
+                        )
                     }
                 }
             }

@@ -37,6 +37,11 @@ class VoiceTypingViewModel(application: Application) : AndroidViewModel(applicat
 
     val signedInGoogleEmail: StateFlow<String> = com.princeniithompson.rapcha.core.ApiKeyVault.googleEmailFlow
     val provisionedApiKey: StateFlow<String> = com.princeniithompson.rapcha.core.ApiKeyVault.userApiKeyFlow
+    val isApiKeyVerified: StateFlow<Boolean> = com.princeniithompson.rapcha.core.ApiKeyVault.isApiKeyVerified
+    val apiKeyErrorReason: StateFlow<String> = com.princeniithompson.rapcha.core.ApiKeyVault.apiKeyErrorReason
+
+    @Volatile
+    private var lastVerifiedCheckKey: String = ""
 
     private val prefsKeyListener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { sharedPrefs, key ->
         if (key == com.princeniithompson.rapcha.core.ApiKeyVault.KEY_CUSTOM_API_KEY) {
@@ -101,8 +106,26 @@ class VoiceTypingViewModel(application: Application) : AndroidViewModel(applicat
         return !com.princeniithompson.rapcha.core.ApiConfig.isPlaceholder(effectiveApiKey)
     }
 
+    fun hasWorkingVerifiedKey(): Boolean {
+        return isApiKeyConfigured() &&
+            com.princeniithompson.rapcha.core.ApiKeyVault.currentApiKeyVerified &&
+            com.princeniithompson.rapcha.core.ApiKeyVault.apiKeyErrorReason.value.isBlank()
+    }
+
+    fun verifyCurrentApiKeyIfNeeded() {
+        val key = effectiveApiKey.trim()
+        if (com.princeniithompson.rapcha.core.ApiConfig.isPlaceholder(key)) return
+        if (com.princeniithompson.rapcha.core.ApiKeyVault.currentApiKeyVerified) return
+        if (key == lastVerifiedCheckKey) return
+        lastVerifiedCheckKey = key
+        viewModelScope.launch {
+            com.princeniithompson.rapcha.core.ApiKeyVault.verifyApiKeyWithGemini(getApplication(), key)
+        }
+    }
+
     fun setCustomApiKey(key: String) {
         val trimmed = key.trim()
+        lastVerifiedCheckKey = ""
         if (com.princeniithompson.rapcha.core.ApiConfig.isPlaceholder(trimmed)) {
             _customApiKey.value = ""
             prefs.edit().remove(KEY_CUSTOM_API_KEY).apply()
@@ -115,6 +138,7 @@ class VoiceTypingViewModel(application: Application) : AndroidViewModel(applicat
             prefs.edit().putString(KEY_CUSTOM_API_KEY, trimmed).apply()
             viewModelScope.launch {
                 com.princeniithompson.rapcha.core.ApiKeyVault.syncManualKey(getApplication(), trimmed)
+                com.princeniithompson.rapcha.core.ApiKeyVault.verifyApiKeyWithGemini(getApplication(), trimmed)
             }
         }
     }
@@ -158,6 +182,7 @@ class VoiceTypingViewModel(application: Application) : AndroidViewModel(applicat
 
     fun clearProvisionedCredentialsForAccountSwitch() {
         _customApiKey.value = ""
+        lastVerifiedCheckKey = ""
         prefs.edit().remove(KEY_CUSTOM_API_KEY).apply()
         com.princeniithompson.rapcha.core.ApiKeyVault.clearInMemoryKeyNow()
         viewModelScope.launch {

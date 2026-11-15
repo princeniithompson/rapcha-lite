@@ -30,7 +30,8 @@ fun DrawScope.drawNotchedOverlayBackground(
     phase2: Float,
     morphProgress: Float,
     sunsetEntranceProgress: Float,
-    waitingLoopProgress: Float
+    waitingLoopProgress: Float,
+    lowPower: Boolean = false
 ) {
     clipPath(path) {
         // Layer 1: Ambient internal Aurora bloom
@@ -81,7 +82,8 @@ fun DrawScope.drawNotchedOverlayBackground(
                 phase2 = phase2,
                 completionMorphProgress = morphProgress,
                 entranceProgress = sunsetEntranceProgress,
-                waitingLoopProgress = waitingLoopProgress
+                waitingLoopProgress = waitingLoopProgress,
+                lowPower = lowPower
             )
         }
     }

@@ -163,8 +163,12 @@ open class RapchaAccessibilityService : AccessibilityService() {
     private var pendingFocusedNode: AccessibilityNodeInfo? = null
 
     private val evalRunnable = Runnable { runCoalescedEvaluation() }
-    private val keyboardWatchRunnable = Runnable { scheduleCoalescedEvaluation(delayMs = 0L) }
-    private val secondKeyboardWatchRunnable = Runnable { scheduleCoalescedEvaluation(delayMs = 0L) }
+    @Volatile
+    private var watchRecheckPending = false
+    private val keyboardWatchRunnable = Runnable {
+        watchRecheckPending = false
+        scheduleCoalescedEvaluation(delayMs = 0L)
+    }
 
     private var receiversRegistered = false
 
@@ -175,6 +179,7 @@ open class RapchaAccessibilityService : AccessibilityService() {
     private var lastForegroundPackage: String? = null
     @Volatile
     private var lastImeWindowPresent = false
+    private var lastReportedImeTopPx = 0
     private val screenReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {
@@ -333,7 +338,11 @@ open class RapchaAccessibilityService : AccessibilityService() {
                 if (title != null) pendingWindowTitle = title
             }
             if (focusSource != null) {
+                val prevPending = pendingFocusedNode
                 pendingFocusedNode = focusSource
+                if (prevPending != null && prevPending !== focusSource) {
+                    safeRecycle(prevPending)
+                }
             }
         }
 
@@ -391,13 +400,16 @@ open class RapchaAccessibilityService : AccessibilityService() {
             if (KeyboardVisibilityGuard.shouldSuppressForDeviceState(screenInteractive, deviceLocked) &&
                 !sessionProtected
             ) {
+                safeRecycle(focusCandidate)
                 lastFocusedEditableNode = null
                 lastEditableFocusElapsedMs = 0L
                 lastImeWindowPresent = false
+                lastReportedImeTopPx = 0
                 keyboardSettle.reset(false)
                 if (lastReportedKeyboardVisible != false) {
                     lastReportedKeyboardVisible = false
                     mainHandler.post {
+                        FloatingBubbleManager.notifyKeyboardBounds(0)
                         FloatingBubbleManager.notifyKeyboardVisibility(false)
                         FloatingBubbleManager.notifyFieldFocus(false)
                     }
@@ -409,7 +421,7 @@ open class RapchaAccessibilityService : AccessibilityService() {
                 lastSeenClassName = windowClass
             }
 
-            // 1. Single getWindows() binder call for IME presence, app windows, and foreground resolution
+            // 1. Single getWindows() binder call for IME presence, IME bounds, app windows, and foreground resolution
             val currentWindows = try {
                 windows ?: emptyList()
             } catch (_: Throwable) {
@@ -417,6 +429,7 @@ open class RapchaAccessibilityService : AccessibilityService() {
             }
 
             var isImeWindowPresent = false
+            var imeTopPx = 0
             val appWindows = ArrayList<ForegroundAppPicker.AppWindow>(currentWindows.size)
             for (window in currentWindows) {
                 val wType = try {
@@ -425,15 +438,18 @@ open class RapchaAccessibilityService : AccessibilityService() {
                     continue
                 }
                 if (wType == AccessibilityWindowInfo.TYPE_INPUT_METHOD) {
+                    val bounds = Rect()
                     val imeVisible = try {
-                        val bounds = Rect()
                         window.getBoundsInScreen(bounds)
-                        (bounds.width() > 0 && bounds.height() > 0) || (bounds.isEmpty && window.isActive)
+                        bounds.width() > 0 && bounds.height() > 0
                     } catch (_: Throwable) {
-                        true
+                        false
                     }
                     if (imeVisible) {
                         isImeWindowPresent = true
+                        if (bounds.top > 0 && (imeTopPx == 0 || bounds.top < imeTopPx)) {
+                            imeTopPx = bounds.top
+                        }
                     }
                     continue
                 }
@@ -444,11 +460,19 @@ open class RapchaAccessibilityService : AccessibilityService() {
                     false
                 }
                 if (!isActiveOrFocused) continue
-                val rootPkg = try {
-                    window.root?.packageName?.toString()
+                val rootNode = try {
+                    window.root
                 } catch (_: Throwable) {
                     null
-                } ?: continue
+                }
+                val rootPkg = try {
+                    rootNode?.packageName?.toString()
+                } catch (_: Throwable) {
+                    null
+                } finally {
+                    safeRecycle(rootNode)
+                }
+                if (rootPkg == null) continue
                 appWindows.add(
                     ForegroundAppPicker.AppWindow(
                         packageName = rootPkg,
@@ -465,7 +489,7 @@ open class RapchaAccessibilityService : AccessibilityService() {
             val wasImePresent = lastImeWindowPresent
             lastImeWindowPresent = isImeWindowPresent
 
-            // 2. Focus candidate evaluation off the main thread (ignore SystemUI / lockscreen / hidden / launcher-without-IME)
+            // 2. Focus candidate evaluation off the main thread (preserves editable node for FloatingTextInjector)
             var focusedEditableConfirmed = false
             if (focusCandidate != null) {
                 val focusPkg = try {
@@ -494,6 +518,8 @@ open class RapchaAccessibilityService : AccessibilityService() {
                     mainHandler.post {
                         FloatingBubbleManager.notifyFieldFocus(true)
                     }
+                } else {
+                    safeRecycle(focusCandidate)
                 }
             }
 
@@ -542,20 +568,13 @@ open class RapchaAccessibilityService : AccessibilityService() {
                     activePackage = resolvedPkgForGuard
                 )
             ) {
-                lastFocusedEditableNode = null
+                // Decoupled from text injection: clear visibility fallback timers only,
+                // never discard lastFocusedEditableNode which FloatingTextInjector P3 relies on.
                 lastEditableFocusElapsedMs = 0L
                 focusedEditableConfirmed = false
             }
 
-            // Fallback editable refresh on worker thread only when IME window is absent and not transitioning out
-            if (!isImeWindowPresent && !focusedEditableConfirmed && !wasImePresent && !activeWindowIsLauncherOrIgnored) {
-                focusedEditableConfirmed = hasFocusedEditableField()
-                if (focusedEditableConfirmed) {
-                    if (lastEditableFocusElapsedMs == 0L) {
-                        lastEditableFocusElapsedMs = started
-                    }
-                }
-            } else if (isImeWindowPresent) {
+            if (isImeWindowPresent) {
                 lastEditableFocusElapsedMs = started
             }
 
@@ -568,37 +587,58 @@ open class RapchaAccessibilityService : AccessibilityService() {
                 nowMs = started
             )
 
+            val resolvedImeTopPx = when {
+                settledVisible && isImeWindowPresent -> imeTopPx
+                !settledVisible -> 0
+                else -> lastReportedImeTopPx
+            }
+            val boundsChanged = resolvedImeTopPx != lastReportedImeTopPx
+            if (boundsChanged) {
+                lastReportedImeTopPx = resolvedImeTopPx
+            }
+
             val previousVisible = lastReportedKeyboardVisible
-            if (previousVisible != settledVisible) {
+            val visibilityChanged = previousVisible != settledVisible
+            if (visibilityChanged) {
                 lastReportedKeyboardVisible = settledVisible
-                val fallbackUsed = !isImeWindowPresent && settledVisible
                 Log.d(
                     TAG,
-                    "Keyboard visibility settled -> $settledVisible (ime=$isImeWindowPresent fallback=$fallbackUsed)"
+                    "Keyboard visibility settled -> $settledVisible (ime=$isImeWindowPresent top=$resolvedImeTopPx)"
                 )
                 if (settledVisible) {
                     BubbleHealthLog.recordShowOpportunity(
                         context = this,
-                        trigger = if (isImeWindowPresent) "ime_window" else "fallback_editable"
+                        trigger = "ime_window"
                     )
                 }
+            }
+            if (visibilityChanged || boundsChanged) {
                 mainHandler.post {
-                    FloatingBubbleManager.notifyKeyboardVisibility(settledVisible)
-                    if (settledVisible &&
-                        FloatingBubbleService.instance == null &&
-                        FloatingBubbleManager.isBubbleEnabledSync(this) &&
-                        FloatingBubbleManager.canDrawOverlays(this)
-                    ) {
-                        FloatingBubbleManager.startBubbleService(this, source = "a11y_ime_recover")
+                    if (boundsChanged) {
+                        FloatingBubbleManager.notifyKeyboardBounds(resolvedImeTopPx)
                     }
-                    if (!settledVisible && !focusedEditableConfirmed) {
-                        FloatingBubbleManager.notifyFieldFocus(false)
+                    if (visibilityChanged) {
+                        FloatingBubbleManager.notifyKeyboardVisibility(settledVisible)
+                        if (settledVisible &&
+                            FloatingBubbleService.instance == null &&
+                            FloatingBubbleManager.isBubbleEnabledSync(this) &&
+                            FloatingBubbleManager.canDrawOverlays(this)
+                        ) {
+                            FloatingBubbleManager.startBubbleService(this, source = "a11y_ime_recover")
+                        }
+                        if (!settledVisible && !focusedEditableConfirmed) {
+                            FloatingBubbleManager.notifyFieldFocus(false)
+                        }
                     }
                 }
             }
 
-            mainHandler.post {
-                scheduleKeyboardWatch()
+            val shouldScheduleOneShotWatch = hasWindowEvent &&
+                (!isImeWindowPresent || previousVisible != settledVisible)
+            if (shouldScheduleOneShotWatch) {
+                mainHandler.post {
+                    scheduleKeyboardWatch()
+                }
             }
         } catch (t: Throwable) {
             Log.w(TAG, "Worker accessibility evaluation failed cleanly", t)
@@ -613,9 +653,18 @@ open class RapchaAccessibilityService : AccessibilityService() {
         return enabledImePackages().contains(pkg.lowercase())
     }
 
+    private fun safeRecycle(node: AccessibilityNodeInfo?) {
+        if (node == null) return
+        try {
+            @Suppress("DEPRECATION")
+            node.recycle()
+        } catch (_: Throwable) {
+        }
+    }
+
     private fun enabledImePackages(): Set<String> {
         val now = SystemClock.uptimeMillis()
-        if (enabledImePackagesAt != 0L && now - enabledImePackagesAt < 2_000L) return enabledImePackages
+        if (enabledImePackagesAt != 0L && now - enabledImePackagesAt < 60_000L) return enabledImePackages
         enabledImePackages = try {
             EnabledImePackages.load(this)
         } catch (_: Throwable) {
@@ -637,11 +686,19 @@ open class RapchaAccessibilityService : AccessibilityService() {
             if (!isApp) continue
             val activeOrFocused = try { window.isActive || window.isFocused } catch (_: Throwable) { false }
             if (!activeOrFocused) continue
-            val pkg = try {
-                window.root?.packageName?.toString()
+            val rootNode = try {
+                window.root
             } catch (_: Throwable) {
                 null
-            } ?: continue
+            }
+            val pkg = try {
+                rootNode?.packageName?.toString()
+            } catch (_: Throwable) {
+                null
+            } finally {
+                safeRecycle(rootNode)
+            }
+            if (pkg == null) continue
             windows.add(
                 ForegroundAppPicker.AppWindow(
                     packageName = pkg,
@@ -674,17 +731,10 @@ open class RapchaAccessibilityService : AccessibilityService() {
     }
 
     private fun scheduleKeyboardWatch() {
+        if (watchRecheckPending) return
+        watchRecheckPending = true
         mainHandler.removeCallbacks(keyboardWatchRunnable)
-        mainHandler.removeCallbacks(secondKeyboardWatchRunnable)
-        val bubbleMayBeShowing = FloatingBubbleManager.isKeyboardVisible.value ||
-            FloatingBubbleManager.isFieldActive.value
-        if (bubbleMayBeShowing) {
-            mainHandler.postDelayed(keyboardWatchRunnable, KEYBOARD_WATCH_MS)
-            mainHandler.postDelayed(
-                secondKeyboardWatchRunnable,
-                KeyboardSettleStateMachine.KEYBOARD_SECOND_CHECK_MS
-            )
-        }
+        mainHandler.postDelayed(keyboardWatchRunnable, KEYBOARD_WATCH_MS)
     }
 
     fun isImeVisibleNow(): Boolean {
@@ -696,17 +746,16 @@ open class RapchaAccessibilityService : AccessibilityService() {
         } catch (_: Throwable) {
             emptyList()
         }
-        val imePresent = currentWindows.any { window ->
+        return currentWindows.any { window ->
             if (window.type != AccessibilityWindowInfo.TYPE_INPUT_METHOD) return@any false
             try {
                 val bounds = Rect()
                 window.getBoundsInScreen(bounds)
-                (bounds.width() > 0 && bounds.height() > 0) || (bounds.isEmpty && window.isActive)
+                bounds.width() > 0 && bounds.height() > 0
             } catch (_: Throwable) {
-                true
+                false
             }
         }
-        return imePresent || hasFocusedEditableField()
     }
 
     fun hasFocusedEditableField(): Boolean {
@@ -1382,7 +1431,9 @@ open class RapchaAccessibilityService : AccessibilityService() {
             for (window in currentWindows) {
                 if (window.type == AccessibilityWindowInfo.TYPE_APPLICATION && (window.isFocused || window.isActive)) {
                     val root = window.root
-                    if (activePkg == null || root?.packageName?.toString() == activePkg) {
+                    val pkg = root?.packageName?.toString()
+                    safeRecycle(root)
+                    if (activePkg == null || pkg == activePkg) {
                         return window
                     }
                 }
@@ -1390,7 +1441,9 @@ open class RapchaAccessibilityService : AccessibilityService() {
             for (window in currentWindows) {
                 if (window.type == AccessibilityWindowInfo.TYPE_APPLICATION) {
                     val root = window.root
-                    if (activePkg == null || root?.packageName?.toString() == activePkg) {
+                    val pkg = root?.packageName?.toString()
+                    safeRecycle(root)
+                    if (activePkg == null || pkg == activePkg) {
                         return window
                     }
                 }
@@ -1416,6 +1469,7 @@ open class RapchaAccessibilityService : AccessibilityService() {
         try {
             val focusedNode = findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
             val focusedPkg = focusedNode?.packageName?.toString()
+            safeRecycle(focusedNode)
             if (!focusedPkg.isNullOrEmpty() && !isForegroundNoise(focusedPkg) &&
                 !ForegroundAppPicker.isLauncherPackage(focusedPkg)
             ) {
@@ -1426,7 +1480,9 @@ open class RapchaAccessibilityService : AccessibilityService() {
         }
 
         // 2. Check root in active window
-        val rootPkg = rootInActiveWindow?.packageName?.toString()
+        val activeRoot = try { rootInActiveWindow } catch (_: Throwable) { null }
+        val rootPkg = activeRoot?.packageName?.toString()
+        safeRecycle(activeRoot)
         if (!IgnoredPackages.isIgnoredPackage(this, rootPkg)) {
             return rootPkg
         }
@@ -1454,7 +1510,9 @@ open class RapchaAccessibilityService : AccessibilityService() {
             // Check focused or active application window first
             for (window in currentWindows) {
                 if (window.type == AccessibilityWindowInfo.TYPE_APPLICATION && (window.isFocused || window.isActive)) {
-                    val pkg = window.root?.packageName?.toString()
+                    val root = window.root
+                    val pkg = root?.packageName?.toString()
+                    safeRecycle(root)
                     if (!IgnoredPackages.isIgnoredPackage(this, pkg)) {
                         return pkg
                     }
@@ -1463,7 +1521,9 @@ open class RapchaAccessibilityService : AccessibilityService() {
             // Check any application window in z-order
             for (window in currentWindows) {
                 if (window.type == AccessibilityWindowInfo.TYPE_APPLICATION) {
-                    val pkg = window.root?.packageName?.toString()
+                    val root = window.root
+                    val pkg = root?.packageName?.toString()
+                    safeRecycle(root)
                     if (!IgnoredPackages.isIgnoredPackage(this, pkg)) {
                         return pkg
                     }

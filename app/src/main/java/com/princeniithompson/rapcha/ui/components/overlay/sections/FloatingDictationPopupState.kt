@@ -42,6 +42,7 @@ class FloatingDictationPopupState(
     val isPolishing: Boolean,
     val scrollState: ScrollState,
     val mimicTalkingWhenSilent: Boolean = false,
+    val lowPower: Boolean = false,
     private val onLocalCompleteTriggered: () -> Unit
 ) {
     val effectiveAmp: Float
@@ -228,7 +229,7 @@ fun rememberFloatingDictationPopupState(
     return remember(
         glowPulse, phase1, phase2, animatedAmplitude, idleBreathing,
         cursorAlpha, morphProgress, sunsetEntranceProgress, waitingLoopProgress,
-        isFinalizing, isPolishing, scrollState
+        isFinalizing, isPolishing, scrollState, lowPower
     ) {
         FloatingDictationPopupState(
             glowPulse = glowPulse,
@@ -244,6 +245,7 @@ fun rememberFloatingDictationPopupState(
             isPolishing = isPolishing,
             scrollState = scrollState,
             mimicTalkingWhenSilent = mimicTalkingWhenSilent,
+            lowPower = lowPower,
             onLocalCompleteTriggered = {
                 isCompletingLocally = true
             }

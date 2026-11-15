@@ -43,6 +43,9 @@ object FloatingBubbleManager {
     private val _isKeyboardVisible = MutableStateFlow(false)
     val isKeyboardVisible: StateFlow<Boolean> = _isKeyboardVisible.asStateFlow()
 
+    private val _imeTopPx = MutableStateFlow(0)
+    val imeTopPx: StateFlow<Int> = _imeTopPx.asStateFlow()
+
     private val _isRecording = MutableStateFlow(false)
     val isRecording: StateFlow<Boolean> = _isRecording.asStateFlow()
 
@@ -184,6 +187,24 @@ object FloatingBubbleManager {
         val a11y = isAccessibilityServiceEnabled(context) || RapchaAccessibilityService.instance != null
         if (a11y) {
             _isAccessibilityConnected.value = true
+        }
+        if (_isBubbleEnabled.value && overlay && isUiForeground(context)) {
+            FloatingBubbleService.instance?.ensureForegroundPromoted()
+        }
+    }
+
+    fun ensureBubbleRunningAndPromoted(context: Context, source: String = "user_resume") {
+        if (!initialized) {
+            init(context)
+        }
+        if (!_isBubbleEnabled.value || !canDrawOverlays(context)) return
+        val runningService = FloatingBubbleService.instance
+        if (runningService != null) {
+            if (!runningService.ensureForegroundPromoted()) {
+                startBubbleService(context, source = source, bypassThrottle = true)
+            }
+        } else {
+            startBubbleService(context, source = source, bypassThrottle = true)
         }
     }
 
@@ -334,11 +355,19 @@ object FloatingBubbleManager {
         FloatingBubbleService.instance?.onFieldFocusChanged(isFocused)
     }
 
+    fun notifyKeyboardBounds(imeTopPx: Int) {
+        val sanitized = imeTopPx.coerceAtLeast(0)
+        if (_imeTopPx.value != sanitized) {
+            _imeTopPx.value = sanitized
+        }
+    }
+
     fun notifyKeyboardVisibility(visible: Boolean) {
         if (visible && !_isKeyboardVisible.value) {
             bubbleSignalAtElapsed = SystemClock.elapsedRealtime()
         } else if (!visible && _isKeyboardVisible.value) {
             noteBubbleHideSignal()
+            _imeTopPx.value = 0
         }
         _isKeyboardVisible.value = visible
         Log.d(TAG, "notifyKeyboardVisibility: $visible")

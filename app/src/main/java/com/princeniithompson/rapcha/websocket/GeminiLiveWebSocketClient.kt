@@ -170,6 +170,23 @@ class GeminiLiveWebSocketClient(
                 .addHeader("x-goog-api-key", trimmedKey)
                 .build()
         }
+
+        internal fun isNonRetryableApiKeyError(code: Int, statusOrMessage: String): Boolean {
+            if (code == 401 || code == 403) return true
+            val lower = statusOrMessage.lowercase(Locale.US)
+            if (lower.contains("api key") ||
+                lower.contains("apikey") ||
+                lower.contains("api_key_invalid") ||
+                lower.contains("invalid_api_key") ||
+                lower.contains("expired") ||
+                lower.contains("unauthenticated") ||
+                lower.contains("permission_denied") ||
+                lower.contains("permission denied")
+            ) {
+                return true
+            }
+            return false
+        }
     }
 
     private val client: OkHttpClient = okHttpClient ?: ApiConfig.createOkHttpClient()
@@ -436,6 +453,7 @@ class GeminiLiveWebSocketClient(
                     "stage=stage1_ws attempt=${reconnectAttempts.get()} exception=${t.javaClass.simpleName} http=${response?.code ?: 0} ended_reason=$endedReason session_active=${isSessionActive()} reason=${primaryMsg.replace('\n', ' ').take(140)} $netTag"
                 )
 
+                val httpCode = response?.code ?: 0
                 val errorDetails = buildString {
                     append("ended_reason: $endedReason | WebSocket failure: ")
                     append(primaryMsg)
@@ -455,12 +473,39 @@ class GeminiLiveWebSocketClient(
                 }
 
                 Log.w(TAG, "[ConnectionState] FAILURE detected: $errorDetails", t)
-                handleDisconnectOrFailure(errorDetails, t)
+                handleDisconnectOrFailure(errorDetails, t, httpCode)
             }
         })
     }
 
-    private fun handleDisconnectOrFailure(errorDetails: String, throwable: Throwable?) {
+    private fun handleDisconnectOrFailure(
+        errorDetails: String,
+        throwable: Throwable?,
+        httpCode: Int = 0
+    ) {
+        if (isNonRetryableApiKeyError(httpCode, errorDetails)) {
+            isExplicitlyClosed.set(true)
+            isConnectingGuard.set(false)
+            isSetupComplete.set(false)
+            reconnectAttempts.set(MAX_RECONNECT_ATTEMPTS)
+            cancelPendingReconnect()
+            lastApiKey = ""
+            if (activityEnded.get()) {
+                settleEndpoint(lastInterimText, timedOut = true)
+            }
+            val authMsg = "Gemini API key invalid or unauthorized ($errorDetails)"
+            Log.e(TAG, "[ConnectionState] AUTH_FAILED: $authMsg", throwable)
+            onLog(LogLevel.ERROR, TAG, authMsg, null)
+            AppLogRepository.logEvent(
+                diagnosticSource,
+                DiagnosticType.ERROR,
+                authMsg.take(160)
+            )
+            notifyStateChanged(ConnectionState.Error(authMsg))
+            notifyError(authMsg, GeminiLiveError.MissingApiKey(authMsg))
+            return
+        }
+
         if (splitting.get() && !sessionFinalizing.get()) {
             planner.armFreshMode()
             pendingSplit = pendingSplit?.copy(freshConnection = true)
@@ -495,7 +540,7 @@ class GeminiLiveWebSocketClient(
         val sessionStillActive = true
         val attempts = reconnectAttempts.incrementAndGet()
 
-        if (lastApiKey.isNotBlank()) {
+        if (lastApiKey.isNotBlank() && attempts <= MAX_RECONNECT_ATTEMPTS) {
             // True exponential backoff with jitter:
             // delay = min(30000, base * 2^(attempt-1)) + random(0..500 ms)
             // base starts at 1000 ms.
@@ -505,7 +550,7 @@ class GeminiLiveWebSocketClient(
             val backoffMs = (rawBackoff + jitter).coerceAtMost(30500L)
 
             val timeStr = SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date())
-            val reconnectLog = "[$timeStr][Reconnect] Attempt $attempts (delay: ${backoffMs}ms, base: ${rawBackoff}ms, jitter: ${jitter}ms) | sessionActive: $sessionStillActive | activeSockets: ${activeSocketCount.get()} | reason: $errorDetails"
+            val reconnectLog = "[$timeStr][Reconnect] Attempt $attempts/$MAX_RECONNECT_ATTEMPTS (delay: ${backoffMs}ms, base: ${rawBackoff}ms, jitter: ${jitter}ms) | sessionActive: $sessionStillActive | activeSockets: ${activeSocketCount.get()} | reason: $errorDetails"
             Log.i(TAG, "[ConnectionState] RECONNECTING: $reconnectLog")
             onLog(LogLevel.INFO, TAG, reconnectLog, null)
             AppLogRepository.logEvent(
@@ -528,7 +573,7 @@ class GeminiLiveWebSocketClient(
             return
         }
 
-        // Retries exhausted (only when session was not active) or non-retryable fatal error
+        // Retries exhausted or non-retryable fatal error
         isConnectingGuard.set(false)
         lastApiKey = ""
         val timeStr = SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date())
@@ -606,8 +651,21 @@ class GeminiLiveWebSocketClient(
                 }
                 Log.e(TAG, "[ConnectionState] SERVER_ERROR: $detailedError")
                 onLog(LogLevel.ERROR, TAG, detailedError, rawJson)
-                notifyStateChanged(ConnectionState.Error(detailedError))
-                notifyError(detailedError, GeminiLiveError.ServerError(code, status, detailedError))
+                val isKeyError = isNonRetryableApiKeyError(code, "$status $errMsg")
+                if (isKeyError) {
+                    isExplicitlyClosed.set(true)
+                    isConnectingGuard.set(false)
+                    isSetupComplete.set(false)
+                    reconnectAttempts.set(MAX_RECONNECT_ATTEMPTS)
+                    cancelPendingReconnect()
+                    lastApiKey = ""
+                    closeExistingWebSocket()
+                    notifyStateChanged(ConnectionState.Error(detailedError))
+                    notifyError(detailedError, GeminiLiveError.MissingApiKey(detailedError))
+                } else {
+                    notifyStateChanged(ConnectionState.Error(detailedError))
+                    notifyError(detailedError, GeminiLiveError.ServerError(code, status, detailedError))
+                }
                 return
             }
 

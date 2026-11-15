@@ -131,8 +131,16 @@ class AiStudioAutomationEngine(private val context: Context) {
         }
     }
 
+    companion object {
+        fun shouldAllowHiddenBrowser(
+            hasVerifiedWorkingKey: Boolean,
+            onboardingCompleted: Boolean,
+            forceRecovery: Boolean = false
+        ): Boolean = forceRecovery || !hasVerifiedWorkingKey || !onboardingCompleted
+    }
+
     @SuppressLint("SetJavaScriptEnabled")
-    fun createOrReuseWebView(): WebView {
+    fun createOrReuseWebView(forceRecovery: Boolean = false): WebView {
         webView?.let { return it }
 
         val wv = WebView(context).apply {
@@ -315,6 +323,13 @@ class AiStudioAutomationEngine(private val context: Context) {
 
     fun onHostResumed() {
         isHostForeground = true
+        val onboardingDone = com.princeniithompson.rapcha.data.OnboardingRepository.isOnboardingCompleted.value
+        if (!shouldAllowHiddenBrowser(ApiKeyVault.hasVerifiedWorkingKey(), onboardingDone)) {
+            if (!_state.value.showBrowserToUser) {
+                tearDownWebView()
+            }
+            return
+        }
         if (!_state.value.keyProvisioned) {
             scope.launch {
                 val clipKey = readKeyFromClipboard()
@@ -342,6 +357,8 @@ class AiStudioAutomationEngine(private val context: Context) {
 
     private fun recoverAfterRendererLoss(urlToLoad: String) {
         if (_state.value.keyProvisioned) return
+        val onboardingDone = com.princeniithompson.rapcha.data.OnboardingRepository.isOnboardingCompleted.value
+        if (!shouldAllowHiddenBrowser(ApiKeyVault.hasVerifiedWorkingKey(), onboardingDone)) return
         val wv = createOrReuseWebView()
         startupRefreshCountDone = 0
         wv.loadUrl(urlToLoad)
@@ -353,7 +370,7 @@ class AiStudioAutomationEngine(private val context: Context) {
     }
 
     fun startGoogleSignIn(emailHint: String? = null) {
-        val wv = createOrReuseWebView()
+        val wv = createOrReuseWebView(forceRecovery = true)
         startupRefreshCountDone = 0
         getApiKeyTapCount = 0
         routeGuardLoadFallbackCount = 0
@@ -813,6 +830,18 @@ class AiStudioAutomationEngine(private val context: Context) {
             scrubClipboardAfterCapture(key.length)
         }
 
+        val verifyResult = ApiKeyVault.verifyApiKeyWithGemini(appContext, key)
+        if (verifyResult.kind == ApiKeyVault.KeyVerifyKind.INVALID) {
+            ApiKeyVault.clearUserKeyOnly(appContext)
+            _state.value = _state.value.copy(
+                status = ProvisioningStatus.PROVISIONING_BACKGROUND,
+                keyProvisioned = false,
+                showBrowserToUser = false,
+                statusDetail = "Captured key rejected, looking for a working key"
+            )
+            return
+        }
+
         withContext(Dispatchers.Main) {
             try {
                 CookieManager.getInstance().flush()
@@ -826,7 +855,27 @@ class AiStudioAutomationEngine(private val context: Context) {
             showBrowserToUser = false,
             statusDetail = "Personal API key ready"
         )
-        tearDownWebView()
+        val onboardingDone = com.princeniithompson.rapcha.data.OnboardingRepository.isOnboardingCompleted.value
+        if (onboardingDone && verifyResult.kind == ApiKeyVault.KeyVerifyKind.VALID) {
+            tearDownWebView()
+        } else {
+            parkWebViewInStandby()
+        }
+    }
+
+    private suspend fun parkWebViewInStandby() = withContext(Dispatchers.Main) {
+        automationJob?.cancel()
+        automationJob = null
+        webView?.let { wv ->
+            try {
+                wv.stopLoading()
+                wv.onPause()
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    wv.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_WAIVED, true)
+                }
+            } catch (_: Throwable) {
+            }
+        }
     }
 
     private suspend fun runBridgeACheckboxesAndContinue(ctrl: FindInPageController): Boolean {
@@ -1052,6 +1101,8 @@ class AiStudioAutomationEngine(private val context: Context) {
         val destroyAction = Runnable {
             try {
                 wv.stopLoading()
+                wv.onPause()
+                wv.clearHistory()
                 wv.loadUrl("about:blank")
                 (wv.parent as? ViewGroup)?.removeView(wv)
                 wv.removeAllViews()

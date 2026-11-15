@@ -5,9 +5,8 @@ import android.os.SystemClock
 /**
  * Pure settling state machine for keyboard/bubble show-hide transitions.
  *
- * - Show condition = IME window present OR focused editable confirmed recently (within [fallbackEditableExpiryMs]).
- * - Never hides on a single transient negative evaluation: requires at least 2 consecutive
- *   negative evaluations AND >= [hideSettleMs] elapsed since the first negative evaluation.
+ * - Show condition = real non-empty IME window present (never triggers on bare EditText focus alone).
+ * - Hides immediately when IME dismisses unless protected by an active recording/finalizing session.
  */
 class KeyboardSettleStateMachine(
     val hideSettleMs: Long = KEYBOARD_HIDE_SETTLE_MS,
@@ -18,16 +17,13 @@ class KeyboardSettleStateMachine(
     private var consecutiveNegatives = 0
     private var firstNegativeElapsedMs = 0L
 
+    @Suppress("UNUSED_PARAMETER")
     fun isShowConditionMet(
         imeWindowPresent: Boolean,
         focusedEditableActive: Boolean,
         lastTypingOrFocusElapsedMs: Long,
         nowMs: Long
-    ): Boolean {
-        if (imeWindowPresent) return true
-        if (!focusedEditableActive || lastTypingOrFocusElapsedMs <= 0L) return false
-        return (nowMs - lastTypingOrFocusElapsedMs) <= fallbackEditableExpiryMs
-    }
+    ): Boolean = imeWindowPresent
 
     fun evaluate(
         imeWindowPresent: Boolean,
@@ -58,6 +54,12 @@ class KeyboardSettleStateMachine(
             firstNegativeElapsedMs = 0L
             return false
         }
+        if (hideSettleMs <= 0L) {
+            currentVisible = false
+            consecutiveNegatives = 0
+            firstNegativeElapsedMs = 0L
+            return false
+        }
         if (consecutiveNegatives == 0) {
             consecutiveNegatives = 1
             firstNegativeElapsedMs = nowMs
@@ -79,9 +81,9 @@ class KeyboardSettleStateMachine(
     }
 
     companion object {
-        const val KEYBOARD_WATCH_MS = 450L
-        const val KEYBOARD_HIDE_SETTLE_MS = 450L
-        const val KEYBOARD_SECOND_CHECK_MS = 900L
+        const val KEYBOARD_WATCH_MS = 250L
+        const val KEYBOARD_HIDE_SETTLE_MS = 0L
+        const val KEYBOARD_SECOND_CHECK_MS = 250L
         const val FALLBACK_EDITABLE_EXPIRY_MS = 1_500L
     }
 }

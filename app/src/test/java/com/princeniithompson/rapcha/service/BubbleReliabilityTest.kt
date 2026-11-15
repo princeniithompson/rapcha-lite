@@ -23,11 +23,11 @@ import org.robolectric.annotation.Config
 class BubbleReliabilityTest {
 
     @Test
-    fun `keyboard settle state machine tolerates slow IME and requires two negatives plus settle delay`() {
+    fun `keyboard settle state machine requires real IME window and hides immediately on dismissal`() {
         val sm = KeyboardSettleStateMachine()
 
-        // T = 1000ms: focused editable shows bubble (slow IME > 300ms hasn't appeared yet)
-        assertTrue(
+        // Focused editable WITHOUT an IME window must NOT trigger the bubble (Calculator / chat list / launcher fix)
+        assertFalse(
             sm.evaluate(
                 imeWindowPresent = false,
                 focusedEditableActive = true,
@@ -36,58 +36,51 @@ class BubbleReliabilityTest {
                 nowMs = 1000L
             )
         )
-        // T = 1400ms (>300ms later, still within 1500ms fallback): remains visible
-        assertTrue(
-            sm.evaluate(
+        assertFalse(
+            sm.isShowConditionMet(
                 imeWindowPresent = false,
                 focusedEditableActive = true,
                 lastTypingOrFocusElapsedMs = 1000L,
-                sessionProtected = false,
-                nowMs = 1400L
+                nowMs = 1200L
             )
         )
 
-        // T = 2600ms: fallback expired (1600ms > 1500ms) -> 1st negative evaluation MUST NOT hide immediately
+        // Real IME window reveals the bubble immediately
         assertTrue(
             sm.evaluate(
-                imeWindowPresent = false,
-                focusedEditableActive = true,
-                lastTypingOrFocusElapsedMs = 1000L,
-                sessionProtected = false,
-                nowMs = 2600L
-            )
-        )
-
-        // T = 2900ms (2nd negative, but only 300ms elapsed < 450ms settle): MUST NOT hide yet
-        assertTrue(
-            sm.evaluate(
-                imeWindowPresent = false,
+                imeWindowPresent = true,
                 focusedEditableActive = false,
-                lastTypingOrFocusElapsedMs = 1000L,
+                lastTypingOrFocusElapsedMs = 0L,
                 sessionProtected = false,
-                nowMs = 2900L
+                nowMs = 2000L
             )
         )
 
-        // T = 3060ms (3rd negative AND >= 450ms elapsed since T=2600ms): now hides
+        // Dismissing the IME hides the bubble immediately (0ms lingering when hideSettleMs == 0)
         assertFalse(
             sm.evaluate(
                 imeWindowPresent = false,
-                focusedEditableActive = false,
-                lastTypingOrFocusElapsedMs = 1000L,
+                focusedEditableActive = true,
+                lastTypingOrFocusElapsedMs = 2000L,
                 sessionProtected = false,
-                nowMs = 3060L
+                nowMs = 2050L
             )
         )
+
+        // Custom settle delay still honored when explicitly configured (> 0ms)
+        val delayedSm = KeyboardSettleStateMachine(hideSettleMs = 200L)
+        assertTrue(delayedSm.evaluate(true, false, 0L, false, 1000L))
+        assertTrue(delayedSm.evaluate(false, false, 0L, false, 1100L))
+        assertFalse(delayedSm.evaluate(false, false, 0L, false, 1300L))
     }
 
     @Test
-    fun `keyboard settle state machine never hides while session protected and expires fallback at 1500ms`() {
+    fun `keyboard settle state machine keeps active session visible even if IME closes`() {
         val sm = KeyboardSettleStateMachine()
 
         assertTrue(
             sm.evaluate(
-                imeWindowPresent = false,
+                imeWindowPresent = true,
                 focusedEditableActive = true,
                 lastTypingOrFocusElapsedMs = 5000L,
                 sessionProtected = false,
@@ -104,12 +97,11 @@ class BubbleReliabilityTest {
                 nowMs = 25000L
             )
         )
-
-        // Pure condition check for 1500ms fallback expiry
+        // Only an actual IME window satisfies pure show condition
         assertTrue(
             sm.isShowConditionMet(
-                imeWindowPresent = false,
-                focusedEditableActive = true,
+                imeWindowPresent = true,
+                focusedEditableActive = false,
                 lastTypingOrFocusElapsedMs = 5000L,
                 nowMs = 6500L
             )
@@ -119,7 +111,7 @@ class BubbleReliabilityTest {
                 imeWindowPresent = false,
                 focusedEditableActive = true,
                 lastTypingOrFocusElapsedMs = 5000L,
-                nowMs = 6501L
+                nowMs = 6500L
             )
         )
     }

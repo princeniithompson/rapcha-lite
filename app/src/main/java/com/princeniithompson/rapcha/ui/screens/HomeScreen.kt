@@ -531,6 +531,10 @@ private fun BubbleChoicePage(
                 contentAlignment = Alignment.Center
             ) {
                 val base = LocalDensity.current
+                val previewContext = LocalContext.current
+                val isLowPower = remember(previewContext) {
+                    com.princeniithompson.rapcha.service.floating.DevicePerformanceTier.isLowPowerDevice(previewContext)
+                }
                 CompositionLocalProvider(LocalDensity provides Density(base.density, fontScale = 1f)) {
                     MyApplicationTheme(darkTheme = true, dynamicColor = true) {
                         // The previews only draw; the parent Box takes every tap.
@@ -544,6 +548,7 @@ private fun BubbleChoicePage(
                                     audioAmplitude = 0f,
                                     mimicTalkingWhenSilent = true,
                                     bubbleVisible = animating,
+                                    lowPower = isLowPower,
                                     onCancelClick = onChoose,
                                     onPolishClick = onChoose,
                                     onCompleteClick = onChoose,
@@ -557,6 +562,7 @@ private fun BubbleChoicePage(
                                     audioAmplitude = 0f,
                                     mimicTalkingWhenSilent = true,
                                     bubbleVisible = animating,
+                                    lowPower = isLowPower,
                                     onCancel = onChoose,
                                     onComplete = onChoose
                                 )

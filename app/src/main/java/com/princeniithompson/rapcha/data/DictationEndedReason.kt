@@ -13,7 +13,15 @@ object DictationEndedReason {
 
     fun fromMessage(message: String): String {
         val lower = message.lowercase(Locale.US)
-        if (lower.contains("api key") || lower.contains("apikey") || lower.contains("placeholder")) {
+        if (lower.contains("api key") ||
+            lower.contains("apikey") ||
+            lower.contains("api_key") ||
+            lower.contains("placeholder") ||
+            lower.contains("unauthenticated") ||
+            lower.contains("permission_denied") ||
+            lower.contains("http 401") ||
+            lower.contains("http 403")
+        ) {
             return MISSING_API_KEY
         }
         val pingTimeout = lower.contains("ping") || lower.contains("pong") || lower.contains("timeout")

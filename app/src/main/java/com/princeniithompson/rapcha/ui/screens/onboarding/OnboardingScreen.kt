@@ -60,6 +60,17 @@ fun OnboardingScreen(
     val isAccessibilityConnected by viewModel.isAccessibilityConnected.collectAsState()
     val hasOverlayPermission by viewModel.hasOverlayPermission.collectAsState()
     val savedEmail by viewModel.signedInGoogleEmail.collectAsState()
+    val isApiKeyVerified by viewModel.isApiKeyVerified.collectAsState()
+    val apiKeyErrorReason by viewModel.apiKeyErrorReason.collectAsState()
+    val hasVerifiedWorkingKey = viewModel.hasProvisionedPersonalKey() &&
+        isApiKeyVerified &&
+        apiKeyErrorReason.isBlank()
+
+    LaunchedEffect(hasVerifiedWorkingKey) {
+        if (hasVerifiedWorkingKey && !provisioningState.showBrowserToUser) {
+            automationEngine.tearDownWebView()
+        }
+    }
 
     DisposableEffect(lifecycleOwner, ownsEngine) {
         val observer = LifecycleEventObserver { _, event ->
@@ -67,7 +78,7 @@ fun OnboardingScreen(
                 Lifecycle.Event.ON_RESUME -> {
                     viewModel.refreshPermissions()
                     viewModel.tryAutoInjectFromClipboard()
-                    if (ownsEngine) {
+                    if (ownsEngine && !hasVerifiedWorkingKey) {
                         automationEngine.onHostResumed()
                     }
                 }
@@ -129,17 +140,19 @@ fun OnboardingScreen(
             .testTag("screen_onboarding")
     ) {
         // Live full-viewport WebView kept laid out underneath foreground onboarding (alpha = 0f when hidden)
-        // so Angular SPAs and getBoundingClientRect() compute accurate coordinates without stealing touches.
-        EmbeddedGoogleAuthBrowserContainer(
-            webView = activeWebView,
-            visible = provisioningState.showBrowserToUser,
-            pageTitle = provisioningState.pageTitle,
-            currentUrl = provisioningState.currentUrl,
-            isLoading = provisioningState.isPageLoading,
-            progress = provisioningState.loadProgress,
-            onClose = { automationEngine.dismissVisibleBrowser() },
-            onRefresh = { automationEngine.reloadCurrentPage() }
-        )
+        // only until onboarding completes AND the API key is confirmed working.
+        if (activeWebView != null && (!hasVerifiedWorkingKey || provisioningState.showBrowserToUser)) {
+            EmbeddedGoogleAuthBrowserContainer(
+                webView = activeWebView,
+                visible = provisioningState.showBrowserToUser,
+                pageTitle = provisioningState.pageTitle,
+                currentUrl = provisioningState.currentUrl,
+                isLoading = provisioningState.isPageLoading,
+                progress = provisioningState.loadProgress,
+                onClose = { automationEngine.dismissVisibleBrowser() },
+                onRefresh = { automationEngine.reloadCurrentPage() }
+            )
+        }
 
         // Foreground Active Onboarding Screen (opaque layer above hidden WebView)
         Box(
@@ -151,7 +164,7 @@ fun OnboardingScreen(
                 OnboardingStage.WELCOME_HERO -> {
                     OnboardingHeroWelcomeScreen(
                         onGetStarted = {
-                            stage = if (viewModel.hasProvisionedPersonalKey()) {
+                            stage = if (viewModel.hasProvisionedPersonalKey() && apiKeyErrorReason.isBlank()) {
                                 OnboardingStage.INTRO
                             } else {
                                 OnboardingStage.GOOGLE_SIGN_IN
@@ -163,7 +176,7 @@ fun OnboardingScreen(
                 OnboardingStage.GOOGLE_SIGN_IN -> {
                     OnboardingGoogleSignInScreen(
                         onContinueWithGoogle = {
-                            automationEngine.createOrReuseWebView()
+                            automationEngine.createOrReuseWebView(forceRecovery = true)
                             automationEngine.startGoogleSignIn()
                         }
                     )
@@ -177,7 +190,7 @@ fun OnboardingScreen(
                             stage = OnboardingStage.INTRO
                         },
                         onUseAnotherAccount = {
-                            automationEngine.createOrReuseWebView()
+                            automationEngine.createOrReuseWebView(forceRecovery = true)
                             automationEngine.switchGoogleAccount()
                             stage = OnboardingStage.GOOGLE_SIGN_IN
                         }

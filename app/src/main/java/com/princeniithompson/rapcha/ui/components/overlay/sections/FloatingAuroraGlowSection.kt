@@ -5,9 +5,15 @@ import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.princeniithompson.rapcha.ui.components.overlay.AuroraColorPalette
@@ -34,13 +40,16 @@ fun FloatingAuroraGlowSection(
     modifier: Modifier = Modifier,
     content: @Composable BoxScope.() -> Unit
 ) {
+    var cachedSize by remember { mutableStateOf(Size.Zero) }
+    var cachedPath by remember { mutableStateOf<Path?>(null) }
+
     Box(
         modifier = modifier
             .fillMaxWidth()
             .padding(top = 22.dp)
             .clip(notchedShape) // Strict clipping before drawBehind prevents any glow/aurora from leaking outside
             .drawBehind {
-                val path = createNotchedPath(
+                val path = cachedPath?.takeIf { cachedSize == size } ?: createNotchedPath(
                     size = size,
                     density = this,
                     cornerRadius = cornerRadius,
@@ -48,7 +57,10 @@ fun FloatingAuroraGlowSection(
                     notchCenterOffsetX = notchCenterOffsetX,
                     notchCenterOffsetY = notchCenterOffsetY,
                     filletRadius = filletRadius
-                )
+                ).also {
+                    cachedSize = size
+                    cachedPath = it
+                }
                 val cx = size.width - notchCenterOffsetX.toPx()
                 val cy = notchCenterOffsetY.toPx()
 
@@ -66,7 +78,8 @@ fun FloatingAuroraGlowSection(
                     phase2 = state.phase2,
                     morphProgress = state.morphProgress,
                     sunsetEntranceProgress = state.sunsetEntranceProgress,
-                    waitingLoopProgress = state.waitingLoopProgress
+                    waitingLoopProgress = state.waitingLoopProgress,
+                    lowPower = state.lowPower
                 )
             }
             .padding(top = 16.dp, bottom = 12.dp, start = 16.dp, end = 16.dp),

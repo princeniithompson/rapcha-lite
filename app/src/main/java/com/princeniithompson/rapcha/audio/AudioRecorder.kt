@@ -139,6 +139,7 @@ class AudioRecorder(
 
             val chunkBuffer = ByteArray(CHUNK_SIZE_BYTES)
             var filled = 0
+            var consecutiveZeroReads = 0
             while (true) {
                 if (hardStop) break
                 val deadline = drainDeadlineMs
@@ -160,6 +161,14 @@ class AudioRecorder(
                     }
                     break
                 }
+                if (read == 0) {
+                    consecutiveZeroReads++
+                    if (consecutiveZeroReads >= 5) {
+                        try { Thread.sleep(10L) } catch (_: InterruptedException) { break }
+                    }
+                    continue
+                }
+                consecutiveZeroReads = 0
                 filled += read
                 if (filled >= CHUNK_SIZE_BYTES) {
                     val packet = chunkBuffer.copyOf()

@@ -60,7 +60,8 @@ fun DrawScope.renderGlowAnimation(
     phase2: Float,
     completionMorphProgress: Float = 0f,
     entranceProgress: Float = 1f,
-    waitingLoopProgress: Float = 0f
+    waitingLoopProgress: Float = 0f,
+    lowPower: Boolean = false
 ) {
     val w = size.width
     val h = size.height
@@ -80,7 +81,7 @@ fun DrawScope.renderGlowAnimation(
     ) {
         val blockW = (rightX - leftX).coerceAtLeast(1f)
         val blockH = (bottomY - topY).coerceAtLeast(1f)
-        if (leftX <= 0.01f && rightX >= w - 0.01f) {
+        if (lowPower || (leftX <= 0.01f && rightX >= w - 0.01f)) {
             drawContent()
         } else {
             val layerRect = Rect(leftX, topY, rightX, bottomY)

@@ -153,6 +153,7 @@ class FloatingDictationSessionManager(
 
         webSocketClient = GeminiLiveWebSocketClient(
             onSetupComplete = {
+                com.princeniithompson.rapcha.core.ApiKeyVault.markApiKeyVerified(context, apiKey)
                 FloatingBubbleManager.setNetworkProblem(false)
                 val ws = webSocketClient
                 if (ws != null && ws.setupComplete) {
@@ -201,6 +202,14 @@ class FloatingDictationSessionManager(
                 Log.e(TAG, "WebSocket error: $err")
                 FloatingBubbleManager.setNetworkProblem(true)
                 onError(err)
+            },
+            onStructuredError = { structured ->
+                if (structured is com.princeniithompson.rapcha.websocket.GeminiLiveError.MissingApiKey) {
+                    com.princeniithompson.rapcha.core.ApiKeyVault.markApiKeyInvalid(
+                        context = context,
+                        reason = structured.message
+                    )
+                }
             },
             isSessionActive = { isRecording },
             diagnosticSource = DiagnosticSource.BUBBLE,

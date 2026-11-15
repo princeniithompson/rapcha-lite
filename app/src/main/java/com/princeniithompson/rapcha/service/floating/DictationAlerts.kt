@@ -36,6 +36,10 @@ object DictationAlerts {
         alert(context, "Connection dropped. Audio is not being sent.")
     }
 
+    fun apiKeyInvalid(context: Context) {
+        alert(context, "Gemini API key was rejected. Open Rapcha to refresh it.")
+    }
+
     fun microphoneFailed(context: Context) {
         alert(context, "Microphone isn't capturing audio.")
     }

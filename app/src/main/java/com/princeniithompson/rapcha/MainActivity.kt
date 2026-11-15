@@ -65,6 +65,7 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         FloatingBubbleManager.checkPermissions(this)
+        FloatingBubbleManager.ensureBubbleRunningAndPromoted(this, source = "user_resume")
         viewModel.refreshPermissions()
         viewModel.tryAutoInjectFromClipboard()
     }

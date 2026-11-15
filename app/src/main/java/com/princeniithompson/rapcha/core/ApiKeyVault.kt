@@ -129,6 +129,19 @@ object ApiKeyVault {
 
     const val SETTINGS_PREFS_NAME = "voxstream_settings"
     const val KEY_CUSTOM_API_KEY = "custom_api_key"
+    private const val KEY_VERIFIED_KEY_HASH = "verified_gemini_key_hash"
+    private const val KEY_VERIFY_URL = "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1"
+
+    enum class KeyVerifyKind {
+        VALID,
+        INVALID,
+        NETWORK_ERROR
+    }
+
+    data class KeyVerifyResult(
+        val kind: KeyVerifyKind,
+        val reason: String = ""
+    )
 
     private val KEY_ENCRYPTED_API_KEY = stringPreferencesKey("encrypted_gemini_api_key")
     private val KEY_GOOGLE_ACCOUNT_EMAIL = stringPreferencesKey("encrypted_google_email")
@@ -148,13 +161,52 @@ object ApiKeyVault {
     var currentUserApiKey: String = ""
         private set
 
+    @Volatile
+    var currentApiKeyVerified: Boolean = false
+        private set
+
     private val _userApiKeyFlow = MutableStateFlow("")
     val userApiKeyFlow: StateFlow<String> = _userApiKeyFlow.asStateFlow()
 
     private val _googleEmailFlow = MutableStateFlow("")
     val googleEmailFlow: StateFlow<String> = _googleEmailFlow.asStateFlow()
 
+    private val _isApiKeyVerified = MutableStateFlow(false)
+    val isApiKeyVerified: StateFlow<Boolean> = _isApiKeyVerified.asStateFlow()
+
+    private val _apiKeyErrorReason = MutableStateFlow("")
+    val apiKeyErrorReason: StateFlow<String> = _apiKeyErrorReason.asStateFlow()
+
     fun hasUserApiKey(): Boolean = !ApiConfig.isPlaceholder(currentUserApiKey)
+
+    fun hasVerifiedWorkingKey(): Boolean =
+        hasUserApiKey() && currentApiKeyVerified && _apiKeyErrorReason.value.isBlank()
+
+    private fun hashKey(key: String): String {
+        val trimmed = key.trim()
+        if (trimmed.isEmpty()) return ""
+        return try {
+            val digest = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(trimmed.toByteArray(StandardCharsets.UTF_8))
+            Base64.encodeToString(digest, Base64.NO_WRAP)
+        } catch (_: Throwable) {
+            trimmed.hashCode().toString()
+        }
+    }
+
+    private fun refreshVerifiedStateFromPrefs(context: Context, key: String) {
+        val trimmed = key.trim()
+        if (ApiConfig.isPlaceholder(trimmed)) {
+            currentApiKeyVerified = false
+            _isApiKeyVerified.value = false
+            return
+        }
+        val prefs = context.getSharedPreferences(SETTINGS_PREFS_NAME, Context.MODE_PRIVATE)
+        val storedHash = prefs.getString(KEY_VERIFIED_KEY_HASH, "").orEmpty()
+        val verified = storedHash.isNotEmpty() && storedHash == hashKey(trimmed)
+        currentApiKeyVerified = verified
+        _isApiKeyVerified.value = verified
+    }
 
     fun init(context: Context) {
         val appCtx = context.applicationContext ?: context
@@ -171,6 +223,7 @@ object ApiKeyVault {
                     currentUserApiKey = prefsKey
                     _userApiKeyFlow.value = prefsKey
                 }
+                refreshVerifiedStateFromPrefs(appCtx, currentUserApiKey)
             } catch (_: Throwable) {
             }
         }
@@ -220,6 +273,7 @@ object ApiKeyVault {
 
         currentUserApiKey = resolvedKey
         _userApiKeyFlow.value = resolvedKey
+        refreshVerifiedStateFromPrefs(appCtx, resolvedKey)
 
         val encEmail = prefs[KEY_GOOGLE_ACCOUNT_EMAIL].orEmpty()
         val decryptedEmail = if (encEmail.isNotEmpty()) {
@@ -245,13 +299,23 @@ object ApiKeyVault {
         val appCtx = context.applicationContext ?: context
         appContext = appCtx
 
+        val previousKey = currentUserApiKey.trim()
         // Always update in-memory + voxstream_settings custom_api_key immediately so UI & services sync
         currentUserApiKey = trimmed
         _userApiKeyFlow.value = trimmed
-        appCtx.getSharedPreferences(SETTINGS_PREFS_NAME, Context.MODE_PRIVATE)
+        _apiKeyErrorReason.value = ""
+        val prefsEditor = appCtx.getSharedPreferences(SETTINGS_PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putString(KEY_CUSTOM_API_KEY, trimmed)
-            .apply()
+        if (previousKey != trimmed) {
+            prefsEditor.remove(KEY_VERIFIED_KEY_HASH)
+            currentApiKeyVerified = false
+            _isApiKeyVerified.value = false
+        }
+        prefsEditor.apply()
+        if (previousKey == trimmed) {
+            refreshVerifiedStateFromPrefs(appCtx, trimmed)
+        }
 
         val encryptedKey = try {
             cipherAdapter.encrypt(trimmed)
@@ -301,27 +365,104 @@ object ApiKeyVault {
             saveUserApiKey(appCtx, trimmed, email = null)
         } else {
             appContext = appCtx
+            val previousKey = currentUserApiKey.trim()
             currentUserApiKey = trimmed
             _userApiKeyFlow.value = trimmed
-            appCtx.getSharedPreferences(SETTINGS_PREFS_NAME, Context.MODE_PRIVATE)
+            _apiKeyErrorReason.value = ""
+            val editor = appCtx.getSharedPreferences(SETTINGS_PREFS_NAME, Context.MODE_PRIVATE)
                 .edit()
                 .putString(KEY_CUSTOM_API_KEY, trimmed)
-                .apply()
+            if (previousKey != trimmed) {
+                editor.remove(KEY_VERIFIED_KEY_HASH)
+                currentApiKeyVerified = false
+                _isApiKeyVerified.value = false
+            }
+            editor.apply()
+        }
+    }
+
+    fun markApiKeyVerified(context: Context, apiKey: String = currentUserApiKey) {
+        val trimmed = apiKey.trim()
+        if (ApiConfig.isPlaceholder(trimmed)) return
+        val appCtx = context.applicationContext ?: context
+        appContext = appCtx
+        val keyHash = hashKey(trimmed)
+        appCtx.getSharedPreferences(SETTINGS_PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_VERIFIED_KEY_HASH, keyHash)
+            .apply()
+        currentApiKeyVerified = true
+        _isApiKeyVerified.value = true
+        _apiKeyErrorReason.value = ""
+    }
+
+    fun markApiKeyInvalid(context: Context, reason: String) {
+        val appCtx = context.applicationContext ?: context
+        appContext = appCtx
+        appCtx.getSharedPreferences(SETTINGS_PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .remove(KEY_VERIFIED_KEY_HASH)
+            .apply()
+        currentApiKeyVerified = false
+        _isApiKeyVerified.value = false
+        _apiKeyErrorReason.value = reason.trim().ifBlank { "Gemini API key was rejected." }
+    }
+
+    suspend fun verifyApiKeyWithGemini(context: Context, apiKey: String): KeyVerifyResult {
+        val trimmed = apiKey.trim()
+        if (ApiConfig.isPlaceholder(trimmed)) {
+            markApiKeyInvalid(context, "Gemini API key is missing.")
+            return KeyVerifyResult(KeyVerifyKind.INVALID, "Gemini API key is missing.")
+        }
+        return kotlinx.coroutines.withContext(Dispatchers.IO) {
+            try {
+                val request = okhttp3.Request.Builder()
+                    .url(KEY_VERIFY_URL)
+                    .addHeader("x-goog-api-key", trimmed)
+                    .get()
+                    .build()
+                ApiConfig.createOkHttpClient().newCall(request).execute().use { response ->
+                    val code = response.code
+                    when {
+                        response.isSuccessful -> {
+                            markApiKeyVerified(context, trimmed)
+                            KeyVerifyResult(KeyVerifyKind.VALID)
+                        }
+                        code == 400 || code == 401 || code == 403 -> {
+                            val msg = "API key rejected (HTTP $code)"
+                            markApiKeyInvalid(context, msg)
+                            KeyVerifyResult(KeyVerifyKind.INVALID, msg)
+                        }
+                        else -> {
+                            KeyVerifyResult(KeyVerifyKind.NETWORK_ERROR, "HTTP $code")
+                        }
+                    }
+                }
+            } catch (e: Throwable) {
+                KeyVerifyResult(KeyVerifyKind.NETWORK_ERROR, e.message ?: e.javaClass.simpleName)
+            }
         }
     }
 
     fun clearInMemoryKeyNow() {
         currentUserApiKey = ""
         _userApiKeyFlow.value = ""
+        currentApiKeyVerified = false
+        _isApiKeyVerified.value = false
+        _apiKeyErrorReason.value = ""
     }
 
     suspend fun clearUserKeyOnly(context: Context) {
         val appCtx = context.applicationContext ?: context
         currentUserApiKey = ""
         _userApiKeyFlow.value = ""
+        currentApiKeyVerified = false
+        _isApiKeyVerified.value = false
+        _apiKeyErrorReason.value = ""
         appCtx.getSharedPreferences(SETTINGS_PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .remove(KEY_CUSTOM_API_KEY)
+            .remove(KEY_VERIFIED_KEY_HASH)
             .apply()
         try {
             appCtx.rapchaKeyVaultDataStore.edit { prefs ->
@@ -357,9 +498,13 @@ object ApiKeyVault {
         currentUserApiKey = ""
         _userApiKeyFlow.value = ""
         _googleEmailFlow.value = ""
+        currentApiKeyVerified = false
+        _isApiKeyVerified.value = false
+        _apiKeyErrorReason.value = ""
         appCtx.getSharedPreferences(SETTINGS_PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .remove(KEY_CUSTOM_API_KEY)
+            .remove(KEY_VERIFIED_KEY_HASH)
             .apply()
         try {
             appCtx.rapchaKeyVaultDataStore.edit { prefs ->
@@ -379,6 +524,9 @@ object ApiKeyVault {
         currentUserApiKey = ""
         _userApiKeyFlow.value = ""
         _googleEmailFlow.value = ""
+        currentApiKeyVerified = false
+        _isApiKeyVerified.value = false
+        _apiKeyErrorReason.value = ""
         cipherAdapter = AndroidKeyStoreCipherAdapter
     }
 }

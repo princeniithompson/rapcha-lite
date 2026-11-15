@@ -500,6 +500,16 @@ class FloatingBubbleService : Service() {
         }
     }
 
+    fun ensureForegroundPromoted(): Boolean {
+        if (promotedToForeground) return true
+        val recording = ::sessionManager.isInitialized && sessionManager.isRecording
+        return if (recording) {
+            startMicrophoneForeground()
+        } else {
+            enterSpecialUseForeground()
+        }
+    }
+
     /**
      * Must run before any other service work. A late or failed startForeground
      * is what produces ForegroundServiceDidNotStartInTime after an update.
@@ -691,7 +701,13 @@ class FloatingBubbleService : Service() {
             performInjectionAndClose(partial)
         } else {
             stopVoiceTyping(endedReason = "error")
-            DictationAlerts.connectionDropped(this)
+            val isKeyFailure = com.princeniithompson.rapcha.data.DictationEndedReason.fromMessage(err) ==
+                com.princeniithompson.rapcha.data.DictationEndedReason.MISSING_API_KEY
+            if (isKeyFailure) {
+                DictationAlerts.apiKeyInvalid(this)
+            } else {
+                DictationAlerts.connectionDropped(this)
+            }
             resetAndCollapse()
         }
     }
