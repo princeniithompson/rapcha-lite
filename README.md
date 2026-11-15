@@ -28,11 +28,13 @@
   <a href="https://github.com/princeniithompson/rapcha-lite/releases/latest/download/rapcha-lite.apk"><img src="docs/images/install.svg" alt="Install" width="480"></a>
 </p>
 
-<p align="center">
-  <img src="docs/images/1-speak.jpg" width="260" alt="Speak, and it types for you">
-  <img src="docs/images/2-every-app.jpg" width="260" alt="Works in every app">
-  <img src="docs/images/3-your-words.jpg" width="260" alt="Add your words">
-</p>
+<table>
+  <tr>
+    <td><img src="docs/images/1-speak.jpg" width="240" alt="Speak, and it types for you"></td>
+    <td><img src="docs/images/2-every-app.jpg" width="240" alt="Works in every app"></td>
+    <td><img src="docs/images/3-your-words.jpg" width="240" alt="Add your words"></td>
+  </tr>
+</table>
 
 ## How to install
 
