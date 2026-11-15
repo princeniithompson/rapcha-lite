@@ -18,6 +18,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.ViewCompositionStrategy
+import androidx.compose.ui.platform.compositionContext
 import com.princeniithompson.rapcha.data.DiagnosticType
 import com.princeniithompson.rapcha.diagnostics.BubbleHealthLog
 import com.princeniithompson.rapcha.diagnostics.BubbleHealthRateLimiter
@@ -202,6 +203,18 @@ class FloatingOverlayWindowManager(private val context: Context) {
             isHapticFeedbackEnabled = false
             descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
         }
+        lifecycleOwner.attachToView(rootContainer)
+        rootContainer.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+            override fun onViewAttachedToWindow(v: View) = Unit
+            override fun onViewDetachedFromWindow(v: View) {
+                // WindowRecomposer cancels the root's Recomposer on detach; clear the reference
+                // so a subsequent re-attach & expand creates a fresh active Recomposer.
+                try {
+                    v.compositionContext = null
+                } catch (_: Throwable) {
+                }
+            }
+        })
 
         val nativeIdle = IdleBubbleNativeView(
             context = safeContext,
@@ -585,10 +598,17 @@ class FloatingOverlayWindowManager(private val context: Context) {
     }
 
     fun expandPanel() {
+        val root = overlayView ?: return
         dragSnapHandler.cancel()
         dragSnapHandler.updateImeTopPx(FloatingBubbleManager.imeTopPx.value)
+        isConcealing = false
+        root.animate().cancel()
+        root.alpha = 1f
+        root.scaleX = 1f
+        root.scaleY = 1f
         overlayExpanded.value = true
         idleBubbleView?.visibility = View.GONE
+        setViewVisibilityImmediate(root, true, null)
         ensureExpandedComposeViewAttached()
         setOverlayRendering(true)
 
@@ -627,10 +647,12 @@ class FloatingOverlayWindowManager(private val context: Context) {
         if (!isAttached()) {
             attachWithRetry("expand")
         }
-        try {
-            windowManager?.updateViewLayout(overlayView, lp)
-        } catch (e: Exception) {
-            Log.e(TAG, "Error updating window layout on expand", e)
+        if (isAttached()) {
+            try {
+                windowManager?.updateViewLayout(root, lp)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error updating window layout on expand", e)
+            }
         }
     }
 

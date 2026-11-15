@@ -34,16 +34,21 @@ class FloatingOverlayLifecycleOwner : LifecycleOwner, SavedStateRegistryOwner, V
         get() = store
 
     fun onCreate() {
+        if (lifecycleRegistry.currentState != Lifecycle.State.INITIALIZED) return
         savedStateRegistryController.performRestore(null)
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_CREATE)
     }
 
     fun onStart() {
-        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_START)
+        if (lifecycleRegistry.currentState == Lifecycle.State.CREATED) {
+            lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_START)
+        }
     }
 
     fun onResume() {
-        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_RESUME)
+        if (lifecycleRegistry.currentState == Lifecycle.State.STARTED) {
+            lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_RESUME)
+        }
     }
 
     fun onPause() {
@@ -73,7 +78,10 @@ class FloatingOverlayLifecycleOwner : LifecycleOwner, SavedStateRegistryOwner, V
     }
 
     fun onDestroy() {
-        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_DESTROY)
+        val current = lifecycleRegistry.currentState
+        if (current != Lifecycle.State.DESTROYED && current != Lifecycle.State.INITIALIZED) {
+            lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_DESTROY)
+        }
         store.clear()
     }
 

@@ -166,7 +166,11 @@ fun getAppDynamicColorScheme(context: Context, darkTheme: Boolean, toneId: Strin
                 )
             }
         } catch (_: Throwable) {
-            return if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
+            return try {
+                if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
+            } catch (_: Throwable) {
+                if (darkTheme) DarkColorScheme else LightColorScheme
+            }
         }
     }
     return if (darkTheme) DarkColorScheme else LightColorScheme

@@ -541,7 +541,10 @@ class FloatingBubbleService : Service() {
     private fun startMicrophoneForeground(): Boolean {
         val hasMicPerm = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
             PackageManager.PERMISSION_GRANTED
-        val allowedState = MicrophoneForegroundPolicy.isAllowed(this)
+        val overlayActiveWithA11y = RapchaAccessibilityService.isBubbleBound() &&
+            ::overlayWindowManager.isInitialized &&
+            overlayWindowManager.isWindowVisible()
+        val allowedState = MicrophoneForegroundPolicy.isAllowed(this) || overlayActiveWithA11y
         if (!hasMicPerm || !allowedState) {
             Log.w(TAG, "microphone startForeground skipped: perm=$hasMicPerm allowed=$allowedState")
             return false
@@ -591,12 +594,6 @@ class FloatingBubbleService : Service() {
             return
         }
         if (startsRecordingOnTap(recording, keyboard, field)) {
-            if (overlayWindowManager.overlayShrunk.value || !overlayWindowManager.overlayExpanded.value) {
-                overlayWindowManager.expandToFullSize()
-            }
-            if (!overlayWindowManager.overlayExpanded.value) {
-                overlayWindowManager.expandPanel()
-            }
             startVoiceTyping()
         }
     }
@@ -607,6 +604,9 @@ class FloatingBubbleService : Service() {
 
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             Toast.makeText(this, "Microphone permission required. Please grant it in Rapcha.", Toast.LENGTH_LONG).show()
+            if (::overlayWindowManager.isInitialized && overlayWindowManager.overlayExpanded.value) {
+                overlayWindowManager.collapsePanel()
+            }
             val appIntent = Intent(this, MainActivity::class.java).apply {
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK
             }
@@ -617,7 +617,7 @@ class FloatingBubbleService : Service() {
         val apiKey = getEffectiveApiKey()
         if (ApiConfig.isPlaceholder(apiKey)) {
             Toast.makeText(this, "Gemini API key is required. Please set it in Rapcha app first.", Toast.LENGTH_LONG).show()
-            if (::overlayWindowManager.isInitialized) {
+            if (::overlayWindowManager.isInitialized && overlayWindowManager.overlayExpanded.value) {
                 overlayWindowManager.collapsePanel()
             }
             return
@@ -627,6 +627,8 @@ class FloatingBubbleService : Service() {
             DictationAlerts.microphoneFailed(this)
             if (::sessionManager.isInitialized && sessionManager.isRecording) {
                 stopVoiceTyping(endedReason = "microphone_foreground_denied")
+            } else if (::overlayWindowManager.isInitialized && overlayWindowManager.overlayExpanded.value) {
+                overlayWindowManager.collapsePanel()
             }
             return
         }

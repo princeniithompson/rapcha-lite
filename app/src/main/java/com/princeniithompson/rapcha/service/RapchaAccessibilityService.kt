@@ -699,11 +699,13 @@ open class RapchaAccessibilityService : AccessibilityService() {
                 safeRecycle(rootNode)
             }
             if (pkg == null) continue
+            val isActiveWin = try { window.isActive } catch (_: Throwable) { false }
+            val isFocusedWin = try { window.isFocused } catch (_: Throwable) { false }
             windows.add(
                 ForegroundAppPicker.AppWindow(
                     packageName = pkg,
-                    active = window.isActive,
-                    focused = window.isFocused,
+                    active = isActiveWin,
+                    focused = isFocusedWin,
                     typeApplication = true
                 )
             )
@@ -747,8 +749,8 @@ open class RapchaAccessibilityService : AccessibilityService() {
             emptyList()
         }
         return currentWindows.any { window ->
-            if (window.type != AccessibilityWindowInfo.TYPE_INPUT_METHOD) return@any false
             try {
+                if (window.type != AccessibilityWindowInfo.TYPE_INPUT_METHOD) return@any false
                 val bounds = Rect()
                 window.getBoundsInScreen(bounds)
                 bounds.width() > 0 && bounds.height() > 0

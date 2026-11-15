@@ -46,15 +46,19 @@ fun getDynamicTonePalette(context: Context): AuroraColorPalette {
             secondary = Color(c2_300),
             deep = Color(c600)
         )
-    } catch (e: Throwable) {
-        val darkDyn = dynamicDarkColorScheme(context)
-        AuroraColorPalette(
-            primary = darkDyn.primary,
-            primaryLight = darkDyn.primaryContainer,
-            primaryVibrant = darkDyn.primary,
-            secondary = darkDyn.secondary,
-            deep = darkDyn.surfaceTint
-        )
+    } catch (_: Throwable) {
+        try {
+            val darkDyn = dynamicDarkColorScheme(context)
+            AuroraColorPalette(
+                primary = darkDyn.primary,
+                primaryLight = darkDyn.primaryContainer,
+                primaryVibrant = darkDyn.primary,
+                secondary = darkDyn.secondary,
+                deep = darkDyn.surfaceTint
+            )
+        } catch (_: Throwable) {
+            DefaultAuroraPalette
+        }
     }
 }
 
