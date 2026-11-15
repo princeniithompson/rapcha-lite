@@ -134,13 +134,7 @@ jobs:
           SIZE="$(stat -c%s rapcha-lite.apk)"
           LINK="https://github.com/princeniithompson/rapcha-lite/releases/latest/download/rapcha-lite.apk"
           TAG="v${VERSION_CODE}"
-          NOTES="$(cat <<EOF
-Download Rapcha: ${LINK}
-
-Version: ${VERSION_NAME} (versionCode ${VERSION_CODE})
-SHA-256: ${SHA}
-EOF
-)"
+          NOTES="$(printf 'Download Rapcha: %s\n\nVersion: %s (versionCode %s)\nSHA-256: %s\n' "$LINK" "$VERSION_NAME" "$VERSION_CODE" "$SHA")"
 
           if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$TAG" rapcha-lite.apk --clobber -R "$GITHUB_REPOSITORY"
