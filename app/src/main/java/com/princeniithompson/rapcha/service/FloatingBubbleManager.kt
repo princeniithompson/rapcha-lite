@@ -175,7 +175,7 @@ object FloatingBubbleManager {
             colonSplitter.setString(enabledServices)
             while (colonSplitter.hasNext()) {
                 val componentName = colonSplitter.next()
-                if (componentName.contains(context.packageName) && componentName.contains("AccessibilityService")) {
+                if (componentName.startsWith("${context.packageName}/") && componentName.contains("AccessibilityService")) {
                     return true
                 }
             }
