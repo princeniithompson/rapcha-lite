@@ -62,6 +62,17 @@ jobs:
           echo "VERSION_CODE=${VERSION_CODE}" >> "$GITHUB_ENV"
           echo "VERSION_NAME=${VERSION_NAME}" >> "$GITHUB_ENV"
 
+      - name: Use GitHub-only app id and label (installs next to AI Studio build)
+        run: |
+          set -euo pipefail
+          sed -i -E '0,/applicationId = "[^"]+"/s//applicationId = "com.princeniithompson.rapcha.github"/' app/build.gradle.kts
+          sed -i -E 's|(<string name="app_name">)[^<]*(</string>)|\1Rapcha (GitHub)\2|' app/src/main/res/values/strings.xml
+          sed -i -E 's|(<string name="accessibility_service_label">)[^<]*(</string>)|\1Rapcha (GitHub) Voice Typing Assistant\2|' app/src/main/res/values/strings.xml
+          grep -n 'applicationId' app/build.gradle.kts
+          grep -n 'app_name\|accessibility_service_label' app/src/main/res/values/strings.xml
+          grep -q 'applicationId = "com.princeniithompson.rapcha.github"' app/build.gradle.kts
+          grep -q '>Rapcha (GitHub)<' app/src/main/res/values/strings.xml
+
       - name: Decode release keystore
         run: |
           set -euo pipefail
@@ -121,12 +132,14 @@ jobs:
           fi
 
           BADGING="$("$AAPT" dump badging rapcha-lite.apk)"
-          echo "$BADGING" | grep -q "package: name='com.princeniithompson.rapcha'" \
+          echo "$BADGING" | grep -q "package: name='com.princeniithompson.rapcha.github'" \
             || { echo "Unexpected package name"; echo "$BADGING"; exit 1; }
           if echo "$BADGING" | grep -q "application-debuggable"; then
             echo "APK is debuggable; refusing to publish"
             exit 1
           fi
+          echo "$BADGING" | grep -q "application-label:'Rapcha (GitHub)'" \
+            || { echo "Unexpected app label"; echo "$BADGING"; exit 1; }
           echo "$BADGING" | grep -q "versionCode='${VERSION_CODE}'" \
             || { echo "versionCode mismatch"; echo "$BADGING"; exit 1; }
 
