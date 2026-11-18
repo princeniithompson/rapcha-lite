@@ -244,4 +244,59 @@ class OnboardingProvisioningTest {
         assertEquals("", vm.customApiKey.value)
         assertEquals("", vm.effectiveApiKey)
     }
+
+    @Test
+    fun `target project and key name matches Rapcha 30frst and persists onboarding stage across restarts`() {
+        assertEquals("Rapcha 30frst", ProvisioningWebMath.TARGET_KEY_NAME)
+        assertTrue(ProvisioningWebMath.matchesTargetKeyName("Project: Rapcha 30frst"))
+        assertTrue(ProvisioningWebMath.matchesTargetKeyName("rapcha 30frst"))
+        assertFalse(ProvisioningWebMath.matchesTargetKeyName("Gemini Project Premium"))
+
+        com.princeniithompson.rapcha.data.OnboardingRepository.init(app)
+        com.princeniithompson.rapcha.data.OnboardingRepository.resetOnboarding()
+        assertEquals("", com.princeniithompson.rapcha.data.OnboardingRepository.getSavedStageName())
+        assertFalse(com.princeniithompson.rapcha.data.OnboardingRepository.isGoogleSignInStarted())
+
+        com.princeniithompson.rapcha.data.OnboardingRepository.setSavedStageName("GOOGLE_SIGN_IN")
+        com.princeniithompson.rapcha.data.OnboardingRepository.setGoogleSignInStarted(true)
+        assertEquals("GOOGLE_SIGN_IN", com.princeniithompson.rapcha.data.OnboardingRepository.getSavedStageName())
+        assertTrue(com.princeniithompson.rapcha.data.OnboardingRepository.isGoogleSignInStarted())
+
+        com.princeniithompson.rapcha.data.OnboardingRepository.completeOnboarding()
+        assertEquals("", com.princeniithompson.rapcha.data.OnboardingRepository.getSavedStageName())
+        assertFalse(com.princeniithompson.rapcha.data.OnboardingRepository.isGoogleSignInStarted())
+    }
+
+    @Test
+    fun `no internet screen and final onboarding key gate block completion until key is ready`() {
+        var retriedInternet = false
+        var finished = false
+        var retriedKey = false
+
+        composeRule.setContent {
+            com.princeniithompson.rapcha.ui.screens.onboarding.OnboardingNoInternetScreen(
+                onRetry = { retriedInternet = true }
+            )
+        }
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("onboarding_no_internet_screen").assertIsDisplayed()
+        composeRule.onNodeWithText("No internet connection").assertIsDisplayed()
+        composeRule.onNodeWithTag("btn_no_internet_retry").performClick()
+        assertTrue(retriedInternet)
+
+        composeRule.setContent {
+            com.princeniithompson.rapcha.ui.screens.onboarding.OnboardingNotificationScreen(
+                isApiKeyReady = false,
+                isActivatingKey = false,
+                onRetryKeySetup = { retriedKey = true },
+                onFinish = { finished = true }
+            )
+        }
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("btn_skip_notifications").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("btn_onboarding_finish").performClick()
+        assertFalse(finished)
+        assertTrue(retriedKey)
+    }
 }

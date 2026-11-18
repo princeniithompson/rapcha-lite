@@ -194,12 +194,23 @@ object BubbleHealthLog {
 
     fun recordJobOutcome(context: Context, startedOrRunning: Boolean) {
         val p = prefs(context)
-        val next = if (startedOrRunning) p.getInt(KEY_CONSECUTIVE_JOB_SUCCESSES, 0) + 1 else 0
-        p.edit().putInt(KEY_CONSECUTIVE_JOB_SUCCESSES, next).apply()
+        val current = p.getInt(KEY_CONSECUTIVE_JOB_SUCCESSES, 0)
+        if (!startedOrRunning) {
+            if (current != 0) {
+                p.edit().putInt(KEY_CONSECUTIVE_JOB_SUCCESSES, 0).apply()
+            }
+            return
+        }
+        val maxSuccesses = com.princeniithompson.rapcha.service.RecoveryJobPolicy.MAX_CONSECUTIVE_SUCCESSES
+        if (current >= maxSuccesses) return
+        p.edit().putInt(KEY_CONSECUTIVE_JOB_SUCCESSES, current + 1).apply()
     }
 
     fun resetJobSuccessStreak(context: Context) {
-        prefs(context).edit().putInt(KEY_CONSECUTIVE_JOB_SUCCESSES, 0).apply()
+        val p = prefs(context)
+        if (p.getInt(KEY_CONSECUTIVE_JOB_SUCCESSES, 0) != 0) {
+            p.edit().putInt(KEY_CONSECUTIVE_JOB_SUCCESSES, 0).apply()
+        }
     }
 
     private fun prefs(context: Context) =

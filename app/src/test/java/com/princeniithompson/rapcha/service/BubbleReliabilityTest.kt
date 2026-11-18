@@ -254,8 +254,8 @@ class BubbleReliabilityTest {
         assertEquals(60_000L, RecoveryJobPolicy.clampLatencyMs(60_000L))
         assertTrue(RecoveryJobPolicy.shouldReschedule(true, true, 0))
         assertTrue(RecoveryJobPolicy.shouldReschedule(true, true, 2))
-        assertTrue(RecoveryJobPolicy.shouldReschedule(true, true, 3))
-        assertTrue(RecoveryJobPolicy.shouldReschedule(true, true, 100))
+        assertFalse(RecoveryJobPolicy.shouldReschedule(true, true, 3))
+        assertFalse(RecoveryJobPolicy.shouldReschedule(true, true, 100))
         assertFalse(RecoveryJobPolicy.shouldReschedule(false, true, 0))
         assertFalse(RecoveryJobPolicy.shouldReschedule(true, false, 0))
     }

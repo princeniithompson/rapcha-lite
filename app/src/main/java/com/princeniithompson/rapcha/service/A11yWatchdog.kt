@@ -61,11 +61,17 @@ object A11yWatchdog {
     @Volatile
     private var escalatedForEpisode = false
 
+    private const val HEALTHY_RECHECK_INTERVAL_MS = 60_000L
+
     @Volatile
     private var lastReportedKind = A11yRepairKind.NONE
 
+    @Volatile
+    private var lastHealthyPollElapsedMs: Long = 0L
+
     fun onServiceBound(context: Context?) {
         val now = SystemClock.elapsedRealtime()
+        lastHealthyPollElapsedMs = now
         val hadEpisode = lastReportedKind != A11yRepairKind.NONE || disconnectedSinceElapsedMs > 0L
         val durationMs = if (ghostDetectedAtElapsedMs > 0L) {
             (now - ghostDetectedAtElapsedMs).coerceAtLeast(0L)
@@ -93,6 +99,7 @@ object A11yWatchdog {
     }
 
     fun onServiceUnbound(context: Context?) {
+        lastHealthyPollElapsedMs = 0L
         if (disconnectedSinceElapsedMs == 0L) {
             disconnectedSinceElapsedMs = SystemClock.elapsedRealtime()
         }
@@ -107,15 +114,24 @@ object A11yWatchdog {
 
     fun check(context: Context) {
         val now = SystemClock.elapsedRealtime()
+        val connected = RapchaAccessibilityService.instance != null
+        if (connected &&
+            _repairKind.value == A11yRepairKind.NONE &&
+            disconnectedSinceElapsedMs == 0L &&
+            lastHealthyPollElapsedMs > 0L &&
+            (now - lastHealthyPollElapsedMs) < HEALTHY_RECHECK_INTERVAL_MS
+        ) {
+            return
+        }
         val bubbleEnabled = FloatingBubbleManager.isBubbleEnabledSync(context)
         val settingsEnabled = FloatingBubbleManager.isAccessibilityServiceEnabled(context)
-        val connected = RapchaAccessibilityService.instance != null
         val inGrace = BubbleHealthLog.isInPostUpdateGraceWindow(context)
 
         if (connected && settingsEnabled) {
             onServiceBound(context)
             return
         }
+        lastHealthyPollElapsedMs = 0L
 
         if (!connected && disconnectedSinceElapsedMs == 0L) {
             disconnectedSinceElapsedMs = now

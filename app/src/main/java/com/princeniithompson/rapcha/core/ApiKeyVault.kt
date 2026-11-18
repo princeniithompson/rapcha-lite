@@ -26,6 +26,8 @@ import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 
 private val Context.rapchaKeyVaultDataStore: DataStore<Preferences> by preferencesDataStore(
     name = "rapcha_key_vault"
@@ -416,12 +418,51 @@ object ApiKeyVault {
         }
         return kotlinx.coroutines.withContext(Dispatchers.IO) {
             try {
+                val client = ApiConfig.createOkHttpClient()
+                val helloPayload = """{"contents":[{"parts":[{"text":"hello"}]}],"generationConfig":{"maxOutputTokens":1}}"""
+                val mediaType = "application/json; charset=utf-8".toMediaType()
+                val helloUrl = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+                val helloRequest = okhttp3.Request.Builder()
+                    .url(helloUrl)
+                    .addHeader("x-goog-api-key", trimmed)
+                    .post(helloPayload.toRequestBody(mediaType))
+                    .build()
+
+                client.newCall(helloRequest).execute().use { helloResp ->
+                    val code = helloResp.code
+                    when {
+                        helloResp.isSuccessful -> {
+                            markApiKeyVerified(context, trimmed)
+                            return@withContext KeyVerifyResult(KeyVerifyKind.VALID)
+                        }
+                        code == 429 -> {
+                            // Key is valid and authenticated; rate-limited on generateContent
+                            markApiKeyVerified(context, trimmed)
+                            return@withContext KeyVerifyResult(KeyVerifyKind.VALID)
+                        }
+                        code == 400 || code == 401 || code == 403 -> {
+                            val body = try { helloResp.body?.string().orEmpty() } catch (_: Throwable) { "" }
+                            if (code == 400 && !body.contains("API_KEY", ignoreCase = true) && !body.contains("key", ignoreCase = true)) {
+                                // Model parameter change rather than bad key; fall through to models check
+                            } else {
+                                val msg = "API key rejected (HTTP $code)"
+                                markApiKeyInvalid(context, msg)
+                                return@withContext KeyVerifyResult(KeyVerifyKind.INVALID, msg)
+                            }
+                        }
+                        code != 404 -> {
+                            return@withContext KeyVerifyResult(KeyVerifyKind.NETWORK_ERROR, "HTTP $code")
+                        }
+                    }
+                }
+
+                // Fallback if the specific model endpoint returned 404 in a future API revision
                 val request = okhttp3.Request.Builder()
                     .url(KEY_VERIFY_URL)
                     .addHeader("x-goog-api-key", trimmed)
                     .get()
                     .build()
-                ApiConfig.createOkHttpClient().newCall(request).execute().use { response ->
+                client.newCall(request).execute().use { response ->
                     val code = response.code
                     when {
                         response.isSuccessful -> {

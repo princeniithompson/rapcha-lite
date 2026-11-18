@@ -161,7 +161,7 @@ fun FloatingDictationPopup(
                 // Transcript text input box with scrolling & cursor
                 FloatingTranscriptSection(
                     transcriptText = transcriptText,
-                    cursorAlpha = state.cursorAlpha,
+                    cursorAlphaProvider = state.cursorAlphaProvider,
                     palette = palette,
                     scrollState = state.scrollState
                 )

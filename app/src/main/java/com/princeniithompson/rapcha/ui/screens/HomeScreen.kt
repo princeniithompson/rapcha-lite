@@ -50,6 +50,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -72,6 +73,9 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.princeniithompson.rapcha.data.DictationStats
 import com.princeniithompson.rapcha.data.RecentDictations
 import com.princeniithompson.rapcha.service.floating.BubbleChromeStyle
@@ -105,7 +109,10 @@ fun HomeScreen(
     modifier: Modifier = Modifier,
     onDeleteItem: (Long) -> Unit = {},
     autoScroll: Boolean = true,
-    initialPage: Int = HomeCarouselPolicy.PAGE_WORDS_BUBBLE
+    initialPage: Int = HomeCarouselPolicy.PAGE_WORDS_BUBBLE,
+    apiKeyMissingOrInvalid: Boolean = false,
+    isProvisioningKey: Boolean = false,
+    onConnectApiKey: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
@@ -163,6 +170,73 @@ fun HomeScreen(
                 .testTag("home_list"),
             contentPadding = PaddingValues(bottom = 90.dp)
         ) {
+            if (apiKeyMissingOrInvalid) {
+                item {
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 20.dp, vertical = 8.dp)
+                            .clip(RoundedCornerShape(16.dp))
+                            .minimumInteractiveComponentSize()
+                            .clickable(onClick = onConnectApiKey)
+                            .testTag("home_api_key_banner"),
+                        shape = RoundedCornerShape(16.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = Color(0xFFDC2626).copy(alpha = 0.12f)
+                        ),
+                        border = BorderStroke(1.dp, Color(0xFFDC2626).copy(alpha = 0.40f))
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 14.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.WarningAmber,
+                                contentDescription = "Voice key setup needed",
+                                tint = Color(0xFFDC2626),
+                                modifier = Modifier.size(22.dp)
+                            )
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = if (isProvisioningKey) {
+                                        "Activating your Rapcha 30frst key..."
+                                    } else {
+                                        "Voice typing key not active"
+                                    },
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    text = if (isProvisioningKey) {
+                                        "Finishing automatic Google AI Studio setup"
+                                    } else {
+                                        "Tap here to connect your Google key automatically"
+                                    },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            FilledTonalButton(
+                                onClick = onConnectApiKey,
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                modifier = Modifier
+                                    .minimumInteractiveComponentSize()
+                                    .testTag("home_api_key_cta")
+                            ) {
+                                Text(
+                                    text = if (isProvisioningKey) "Working..." else "Activate",
+                                    style = MaterialTheme.typography.labelSmall
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
             if (keepAwakeNeedsFix) {
                 item {
                     Card(
@@ -316,8 +390,20 @@ private fun TopCarouselSection(
     val formattedWords = remember(totals.words) { "%,d".format(totals.words) }
     val wpm = totals.wpm
 
-    LaunchedEffect(autoScroll, pagerState.settledPage) {
-        if (!autoScroll) return@LaunchedEffect
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var isResumed by remember(lifecycleOwner) {
+        mutableStateOf(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
+    }
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, _ ->
+            isResumed = lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    LaunchedEffect(autoScroll, isResumed, pagerState.settledPage) {
+        if (!autoScroll || !isResumed) return@LaunchedEffect
         delay(HomeCarouselPolicy.IDLE_PAGE_MS)
         if (HomeCarouselPolicy.shouldAutoAdvance(idle = true, userInteracting = pagerState.isScrollInProgress)) {
             val nextPage = HomeCarouselPolicy.nextPage(pagerState.settledPage)
@@ -351,7 +437,7 @@ private fun TopCarouselSection(
                         title = "Original bubble",
                         caption = "Shows your words as you speak",
                         active = activeChrome == BubbleChromeStyle.ORIGINAL,
-                        animating = pagerState.currentPage == page,
+                        animating = isResumed && pagerState.currentPage == page,
                         onChoose = { onChooseChrome(BubbleChromeStyle.ORIGINAL) },
                         isDark = isDark
                     )
@@ -360,7 +446,7 @@ private fun TopCarouselSection(
                         title = "Mini bubble",
                         caption = "A small pill with a timer",
                         active = activeChrome == BubbleChromeStyle.COMPACT,
-                        animating = pagerState.currentPage == page,
+                        animating = isResumed && pagerState.currentPage == page,
                         onChoose = { onChooseChrome(BubbleChromeStyle.COMPACT) },
                         isDark = isDark
                     )

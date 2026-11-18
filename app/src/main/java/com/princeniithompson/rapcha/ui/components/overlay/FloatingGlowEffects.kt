@@ -31,7 +31,11 @@ fun DrawScope.drawNotchedOverlayBackground(
     morphProgress: Float,
     sunsetEntranceProgress: Float,
     waitingLoopProgress: Float,
-    lowPower: Boolean = false
+    lowPower: Boolean = false,
+    glassBrush: Brush? = null,
+    borderStroke: Stroke? = null,
+    notchBloomYOffsetPx: Float = 12.dp.toPx(),
+    notchBloomRadiusPx: Float = 48.dp.toPx()
 ) {
     clipPath(path) {
         // Layer 1: Ambient internal Aurora bloom
@@ -55,14 +59,14 @@ fun DrawScope.drawNotchedOverlayBackground(
                     palette.primary.copy(alpha = 0.12f * glowPulse),
                     Color.Transparent
                 ),
-                center = Offset(cx, cy + 12.dp.toPx()),
-                radius = 48.dp.toPx()
+                center = Offset(cx, cy + notchBloomYOffsetPx),
+                radius = notchBloomRadiusPx
             )
         )
 
         // Layer 3: Dark frosted glass background fill
         drawRect(
-            brush = Brush.verticalGradient(
+            brush = glassBrush ?: Brush.verticalGradient(
                 colors = listOf(
                     Color(0x800A1513),
                     Color(0x94060F0E)
@@ -98,7 +102,7 @@ fun DrawScope.drawNotchedOverlayBackground(
                 palette.secondary.copy(alpha = 0.50f * glowPulse)
             )
         ),
-        style = Stroke(
+        style = borderStroke ?: Stroke(
             width = 1.35.dp.toPx(),
             cap = StrokeCap.Round,
             join = StrokeJoin.Round

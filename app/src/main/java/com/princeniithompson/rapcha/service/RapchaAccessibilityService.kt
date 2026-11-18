@@ -634,7 +634,7 @@ open class RapchaAccessibilityService : AccessibilityService() {
             }
 
             val shouldScheduleOneShotWatch = hasWindowEvent &&
-                (!isImeWindowPresent || previousVisible != settledVisible)
+                (wasImePresent || isImeWindowPresent || focusedEditableConfirmed || previousVisible == true || previousVisible != settledVisible)
             if (shouldScheduleOneShotWatch) {
                 mainHandler.post {
                     scheduleKeyboardWatch()

@@ -14,6 +14,8 @@ object OnboardingRepository {
     private const val KEY_ONBOARDING_COMPLETED = "key_onboarding_completed"
     private const val KEY_PREFERRED_DOCK_SIDE = "key_preferred_dock_side"
     private const val KEY_VOICE_TEST_DONE = "key_voice_test_done"
+    private const val KEY_SAVED_ONBOARDING_STAGE = "key_saved_onboarding_stage"
+    private const val KEY_GOOGLE_SIGNIN_STARTED = "key_google_signin_started"
 
     private var prefs: SharedPreferences? = null
 
@@ -36,6 +38,22 @@ object OnboardingRepository {
         }
     }
 
+    fun getSavedStageName(): String {
+        return prefs?.getString(KEY_SAVED_ONBOARDING_STAGE, "")?.trim().orEmpty()
+    }
+
+    fun setSavedStageName(stageName: String) {
+        prefs?.edit()?.putString(KEY_SAVED_ONBOARDING_STAGE, stageName)?.apply()
+    }
+
+    fun isGoogleSignInStarted(): Boolean {
+        return prefs?.getBoolean(KEY_GOOGLE_SIGNIN_STARTED, false) == true
+    }
+
+    fun setGoogleSignInStarted(started: Boolean) {
+        prefs?.edit()?.putBoolean(KEY_GOOGLE_SIGNIN_STARTED, started)?.apply()
+    }
+
     fun setVoiceTestDone(done: Boolean) {
         _hasCompletedVoiceTest.value = done
         prefs?.edit()?.putBoolean(KEY_VOICE_TEST_DONE, done)?.apply()
@@ -49,11 +67,19 @@ object OnboardingRepository {
 
     fun completeOnboarding() {
         _isOnboardingCompleted.value = true
-        prefs?.edit()?.putBoolean(KEY_ONBOARDING_COMPLETED, true)?.apply()
+        prefs?.edit()
+            ?.putBoolean(KEY_ONBOARDING_COMPLETED, true)
+            ?.remove(KEY_SAVED_ONBOARDING_STAGE)
+            ?.putBoolean(KEY_GOOGLE_SIGNIN_STARTED, false)
+            ?.apply()
     }
 
     fun resetOnboarding() {
         _isOnboardingCompleted.value = false
-        prefs?.edit()?.putBoolean(KEY_ONBOARDING_COMPLETED, false)?.apply()
+        prefs?.edit()
+            ?.putBoolean(KEY_ONBOARDING_COMPLETED, false)
+            ?.remove(KEY_SAVED_ONBOARDING_STAGE)
+            ?.putBoolean(KEY_GOOGLE_SIGNIN_STARTED, false)
+            ?.apply()
     }
 }

@@ -20,6 +20,7 @@ class RapchaApplication : Application() {
             // re-creating the process for the accessibility service or a sticky restart), so a
             // startForegroundService here is refused on Android 12+. Ask the recovery job instead;
             // the accessibility service binds the bubble as soon as it reconnects.
+            com.princeniithompson.rapcha.diagnostics.BubbleHealthLog.resetJobSuccessStreak(this)
             com.princeniithompson.rapcha.service.BubbleRecoveryJobScheduler.schedule(
                 this,
                 com.princeniithompson.rapcha.service.RecoveryJobPolicy.MIN_LATENCY_MS

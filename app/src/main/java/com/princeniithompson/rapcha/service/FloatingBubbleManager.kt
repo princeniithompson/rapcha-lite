@@ -94,7 +94,10 @@ object FloatingBubbleManager {
             .edit().putString(KEY_BUBBLE_CHROME, style.stored()).apply()
     }
 
+    @Volatile
     private var initialized = false
+
+    private val EXPLICIT_START_SOURCES = setOf("user_enable", "action_show", "action_restore")
 
     fun init(context: Context) {
         if (initialized) return
@@ -139,6 +142,7 @@ object FloatingBubbleManager {
     }
 
     fun isBubbleEnabledSync(context: Context): Boolean {
+        if (initialized) return _isBubbleEnabled.value
         return try {
             val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             prefs.getBoolean(KEY_BUBBLE_ENABLED, _isBubbleEnabled.value)
@@ -240,6 +244,15 @@ object FloatingBubbleManager {
                 com.princeniithompson.rapcha.diagnostics.BubbleHealthLog.HIDE_OVERLAY_PERMISSION_MISSING
             )
             return false
+        }
+        val runningService = FloatingBubbleService.instance
+        if (runningService != null &&
+            !bypassThrottle &&
+            source !in EXPLICIT_START_SOURCES &&
+            runningService.ensureForegroundPromoted() &&
+            RapchaAccessibilityService.isBubbleBound()
+        ) {
+            return true
         }
         // v23 (Android 12+ background-start fix): when our accessibility service is connected,
         // bind the bubble service from it first. A bind from a running accessibility service is not

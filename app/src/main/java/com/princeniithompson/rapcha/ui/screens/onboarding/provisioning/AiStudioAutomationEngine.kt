@@ -344,15 +344,68 @@ class AiStudioAutomationEngine(private val context: Context) {
             recoverAfterRendererLoss(recoverUrl)
             return
         }
-        webView?.let { wv ->
+        val existingWv = webView
+        if (existingWv != null) {
+            if (!_state.value.keyProvisioned) {
+                registerClipboardListenerIfNeeded()
+            }
             try {
-                wv.onResume()
+                existingWv.onResume()
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    wv.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
+                    existingWv.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
                 }
             } catch (_: Throwable) {
             }
+            if (!_state.value.keyProvisioned &&
+                (_state.value.status == ProvisioningStatus.PROVISIONING_BACKGROUND ||
+                    _state.value.status == ProvisioningStatus.SIGNED_IN_HANDOFF ||
+                    _state.value.status == ProvisioningStatus.FAILED)
+            ) {
+                if (_state.value.status == ProvisioningStatus.FAILED) {
+                    _state.value = _state.value.copy(
+                        status = ProvisioningStatus.PROVISIONING_BACKGROUND,
+                        statusDetail = "Resuming key setup"
+                    )
+                }
+                ensureBackgroundAutomationRunning()
+            }
+        } else if (!_state.value.keyProvisioned) {
+            resumeSilentProvisioningIfPossible()
         }
+    }
+
+    /**
+     * Automatically resumes silent key harvesting after a low-RAM process restart or 2FA app switch
+     * if Google sign-in was already started or cookies exist in CookieManager.
+     */
+    fun resumeSilentProvisioningIfPossible(): Boolean {
+        if (_state.value.keyProvisioned || ApiKeyVault.hasVerifiedWorkingKey()) return false
+        val signInStarted = com.princeniithompson.rapcha.data.OnboardingRepository.isGoogleSignInStarted()
+        val hasSavedEmail = ApiKeyVault.googleEmailFlow.value.isNotBlank()
+        val hasCookies = try {
+            val cm = CookieManager.getInstance()
+            cm.hasCookies() && (
+                !cm.getCookie("https://aistudio.google.com").isNullOrBlank() ||
+                    !cm.getCookie("https://accounts.google.com").isNullOrBlank()
+                )
+        } catch (_: Throwable) {
+            false
+        }
+        if (!signInStarted && !hasSavedEmail && !hasCookies) return false
+
+        val wv = createOrReuseWebView(forceRecovery = true)
+        if (_state.value.status == ProvisioningStatus.IDLE || _state.value.status == ProvisioningStatus.FAILED) {
+            _state.value = _state.value.copy(
+                status = ProvisioningStatus.PROVISIONING_BACKGROUND,
+                showBrowserToUser = false,
+                statusDetail = "Finishing key setup"
+            )
+            if (wv.url.isNullOrBlank() || wv.url == "about:blank") {
+                wv.loadUrl(ProvisioningWebMath.AI_STUDIO_API_KEYS_URL)
+            }
+        }
+        ensureBackgroundAutomationRunning()
+        return true
     }
 
     private fun recoverAfterRendererLoss(urlToLoad: String) {
@@ -370,6 +423,7 @@ class AiStudioAutomationEngine(private val context: Context) {
     }
 
     fun startGoogleSignIn(emailHint: String? = null) {
+        com.princeniithompson.rapcha.data.OnboardingRepository.setGoogleSignInStarted(true)
         val wv = createOrReuseWebView(forceRecovery = true)
         startupRefreshCountDone = 0
         getApiKeyTapCount = 0
@@ -609,6 +663,7 @@ class AiStudioAutomationEngine(private val context: Context) {
     fun ensureBackgroundAutomationRunning() {
         if (_state.value.keyProvisioned) return
         if (automationJob?.isActive == true) return
+        registerClipboardListenerIfNeeded()
 
         automationJob = scope.launch {
             try {
@@ -630,7 +685,7 @@ class AiStudioAutomationEngine(private val context: Context) {
         waitUntilLoaded(wv)
         runTwoRefreshWarmupIfNeeded(wv)
 
-        for (cycle in 1..12) {
+        for (cycle in 1..16) {
             if (!scope.isActive || _state.value.keyProvisioned) return
 
             while (scope.isActive && !isHostForeground && !_state.value.keyProvisioned) {
@@ -677,19 +732,27 @@ class AiStudioAutomationEngine(private val context: Context) {
                 continue
             }
 
-            // Bridge C — Existing keys ("copy" 1..N fallback)
+            // Bridge C — Existing 'Rapcha 30frst' key row or API key details modal
             if (runBridgeCExistingKeyCopy(activeCtrl)) {
                 return
             }
 
-            // Bridge D — Create-Key Modal Completion
+            // Bridge D — Create-Key / Create-Project Modal Completion
             if (runBridgeDCreateKeyModal(activeCtrl)) {
                 delay(1_100L)
                 if (checkKeyNow(activeCtrl)) return
                 continue
             }
 
-            // Bridge E — Zero Keys ("create api key")
+            // On cycle 1, let async key table rows finish rendering before creating a new key
+            if (cycle == 1) {
+                delay(1_000L)
+                if (runBridgeCExistingKeyCopy(activeCtrl)) {
+                    return
+                }
+            }
+
+            // Bridge E — No 'Rapcha 30frst' key found ("create api key")
             if (runBridgeECreateApiKeyButton(activeCtrl)) {
                 delay(900L)
                 if (checkKeyNow(activeCtrl)) return
@@ -864,6 +927,7 @@ class AiStudioAutomationEngine(private val context: Context) {
     }
 
     private suspend fun parkWebViewInStandby() = withContext(Dispatchers.Main) {
+        unregisterClipboardListener()
         automationJob?.cancel()
         automationJob = null
         webView?.let { wv ->
@@ -959,55 +1023,120 @@ class AiStudioAutomationEngine(private val context: Context) {
         withContext(Dispatchers.Main) {
             injectClipboardCopyCapture(webView)
         }
-        val copyMatches = ctrl.findInteractiveMatches("copy", excludePhrases = listOf("copyright"))
-            .filter { !it.disabled }
-        if (copyMatches.isEmpty()) return false
 
-        for (idx in copyMatches.indices) {
-            val currentList = ctrl.findInteractiveMatches("copy", excludePhrases = listOf("copyright"))
-                .filter { !it.disabled }
-            val match = currentList.getOrNull(idx) ?: break
-            val ready = if (match.inViewport) {
-                match
-            } else {
-                ctrl.scrollMatchIntoViewAndRemeasure("copy", match.index, listOf("copyright")) ?: match
-            }
-            ctrl.dispatchRealTap(ready.nx, ready.ny)
-            delay(1_150L)
+        // 1. If the "API key details" modal (Screenshot 4) is already open, copy the key directly
+        val detailsTarget = ctrl.findApiKeyDetailsCopyTarget()
+        if (detailsTarget != null) {
+            ctrl.dispatchRealTap(detailsTarget.nx, detailsTarget.ny)
+            delay(1_100L)
             if (checkKeyNow(ctrl)) return true
+        }
+
+        // 2. Search specifically for our unique "Rapcha 30frst" key/project row (never touch paid or other keys)
+        val namedRow = ctrl.findNamedKeyRowTarget(ProvisioningWebMath.TARGET_KEY_NAME)
+        if (namedRow != null) {
+            ctrl.dispatchRealTap(namedRow.nx, namedRow.ny)
+            delay(1_100L)
+            if (checkKeyNow(ctrl)) return true
+
+            // Tapping the "Rapcha 30frst" row opens the "API key details" modal (Screenshot 4)
+            val openedDetailsTarget = ctrl.findApiKeyDetailsCopyTarget()
+            if (openedDetailsTarget != null) {
+                ctrl.dispatchRealTap(openedDetailsTarget.nx, openedDetailsTarget.ny)
+                delay(1_100L)
+                if (checkKeyNow(ctrl)) return true
+            }
         }
         return false
     }
 
     private suspend fun runBridgeDCreateKeyModal(ctrl: FindInPageController): Boolean {
+        val targetName = ProvisioningWebMath.TARGET_KEY_NAME
+
+        // 1. Handle the "Create a new project" sub-modal (Screenshot 3: "Name your project" -> "Create project")
+        val bodyLower = ctrl.readBodyInnerText().lowercase()
+        if (bodyLower.contains("create a new project") || bodyLower.contains("name your project")) {
+            ctrl.setDialogInputText(targetValue = targetName, labelHint = "project")
+            delay(300L)
+            val createProjSubmit = ctrl.findInteractiveMatches("create project")
+                .lastOrNull { !it.disabled && !it.label.trim().startsWith("+") }
+                ?: ctrl.findInteractiveMatches("create project").lastOrNull { !it.disabled }
+            if (createProjSubmit != null) {
+                val readyProjBtn = if (createProjSubmit.inViewport) {
+                    createProjSubmit
+                } else {
+                    ctrl.scrollMatchIntoViewAndRemeasure("create project", createProjSubmit.index)
+                        ?: createProjSubmit
+                }
+                ctrl.dispatchRealTap(readyProjBtn.nx, readyProjBtn.ny)
+                // Wait for Google Cloud / AI Studio to finish creating the project and return to the key modal
+                delay(3_200L)
+                return true
+            }
+        }
+
+        // 2. Handle the "Create a new key" modal (Screenshot 2: "Name your key" + "Choose an imported project")
         val createKeyMatches = ctrl.findInteractiveMatches(
             query = "create key",
             excludePhrases = listOf("create a new key", "create api key")
         )
         if (createKeyMatches.isEmpty()) return false
 
-        ctrl.fillEmptyKeyNameInput("Rapcha")
+        // Always replace "Gemini API Key" (or blank) in "Name your key" with "Rapcha 30frst"
+        ctrl.setDialogInputText(targetValue = targetName, labelHint = "key")
         delay(250L)
 
-        val projectDropdown = ctrl.findInteractiveMatches("select a cloud project")
-            .firstOrNull { !it.disabled }
-        if (projectDropdown != null) {
-            val readyDropdown = if (projectDropdown.inViewport) {
-                projectDropdown
+        // Check if "Rapcha 30frst" is already the selected project in the dropdown
+        val (alreadySelected, dropdownSelector) = ctrl.findProjectSelectorInCreateKeyModal(targetName)
+        val projectDropdown = dropdownSelector
+            ?: ctrl.findInteractiveMatches("choose an imported project").firstOrNull { !it.disabled }
+            ?: ctrl.findInteractiveMatches("select a cloud project").firstOrNull { !it.disabled }
+
+        if (!alreadySelected && projectDropdown != null) {
+            ctrl.dispatchRealTap(projectDropdown.nx, projectDropdown.ny)
+            delay(750L)
+
+            // 2a. First check if "Rapcha 30frst" already exists in the dropdown list
+            val existingTargetProj = ctrl.findInteractiveMatches(targetName).firstOrNull { !it.disabled }
+            if (existingTargetProj != null) {
+                val readyOpt = if (existingTargetProj.inViewport) {
+                    existingTargetProj
+                } else {
+                    ctrl.scrollMatchIntoViewAndRemeasure(targetName, existingTargetProj.index)
+                        ?: existingTargetProj
+                }
+                ctrl.dispatchRealTap(readyOpt.nx, readyOpt.ny)
+                delay(500L)
             } else {
-                ctrl.scrollMatchIntoViewAndRemeasure("select a cloud project", projectDropdown.index)
-                    ?: projectDropdown
-            }
-            ctrl.dispatchRealTap(readyDropdown.nx, readyDropdown.ny)
-            delay(700L)
-            val option = ctrl.findInteractiveMatches("", excludePhrases = emptyList())
-                .firstOrNull { !it.disabled && it.tagName.equals("MAT-OPTION", ignoreCase = true) }
-                ?: scanFirstVisibleOption(ctrl)
-            if (option != null) {
-                ctrl.dispatchRealTap(option.nx, option.ny)
-                delay(400L)
+                // 2b. Tap "+ Create project" (red arrow in Screenshot 2) to create the "Rapcha 30frst" project
+                val createProjectOption = ctrl.findInteractiveMatches("create project").firstOrNull { !it.disabled }
+                if (createProjectOption != null) {
+                    ctrl.dispatchRealTap(createProjectOption.nx, createProjectOption.ny)
+                    delay(900L)
+                    // Fill "Create a new project" sub-modal (Screenshot 3) right away
+                    ctrl.setDialogInputText(targetValue = targetName, labelHint = "project")
+                    delay(300L)
+                    val submitNewProj = ctrl.findInteractiveMatches("create project")
+                        .lastOrNull { !it.disabled && !it.label.trim().startsWith("+") }
+                        ?: ctrl.findInteractiveMatches("create project").lastOrNull { !it.disabled }
+                    if (submitNewProj != null) {
+                        ctrl.dispatchRealTap(submitNewProj.nx, submitNewProj.ny)
+                        delay(3_200L)
+                    }
+                } else {
+                    // Fallback only if Google account cannot create any more projects
+                    val fallbackOption = scanFirstVisibleOption(ctrl)
+                    if (fallbackOption != null) {
+                        ctrl.dispatchRealTap(fallbackOption.nx, fallbackOption.ny)
+                        delay(400L)
+                    }
+                }
             }
         }
+
+        // Ensure "Name your key" still holds "Rapcha 30frst" before tapping "Create key"
+        ctrl.setDialogInputText(targetValue = targetName, labelHint = "key")
+        delay(200L)
 
         val submitBtn = ctrl.findInteractiveMatches(
             query = "create key",
@@ -1025,6 +1154,9 @@ class AiStudioAutomationEngine(private val context: Context) {
         }
         if (!readyBtn.disabled) {
             ctrl.dispatchRealTap(readyBtn.nx, readyBtn.ny)
+            delay(1_400L)
+            if (checkKeyNow(ctrl)) return true
+            if (runBridgeCExistingKeyCopy(ctrl)) return true
             return true
         }
         return false

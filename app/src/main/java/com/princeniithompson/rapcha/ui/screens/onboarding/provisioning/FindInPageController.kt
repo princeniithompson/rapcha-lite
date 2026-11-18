@@ -20,6 +20,12 @@ import kotlin.math.roundToInt
 object ProvisioningWebMath {
 
     const val AI_STUDIO_API_KEYS_URL = "https://aistudio.google.com/api-keys"
+    const val TARGET_KEY_NAME = "Rapcha 30frst"
+
+    fun matchesTargetKeyName(text: String?): Boolean {
+        if (text.isNullOrBlank()) return false
+        return text.contains(TARGET_KEY_NAME, ignoreCase = true)
+    }
 
     fun buildGoogleSignInUrl(emailHint: String? = null): String {
         val base = "https://accounts.google.com/ServiceLogin?continue=${Uri.encode(AI_STUDIO_API_KEYS_URL)}"
@@ -521,40 +527,301 @@ class FindInPageController(private val webView: WebView) {
         return scanCheckboxes().getOrNull(checkboxIndex)
     }
 
-    suspend fun fillEmptyKeyNameInput(defaultKeyName: String = "Rapcha"): Boolean {
-        val escapedName = JSONObject.quote(defaultKeyName)
+    suspend fun fillEmptyKeyNameInput(defaultKeyName: String = ProvisioningWebMath.TARGET_KEY_NAME): Boolean {
+        return setDialogInputText(targetValue = defaultKeyName, labelHint = "")
+    }
+
+    /**
+     * Sets the value of the visible text input in the active modal (e.g. "Name your key" even when
+     * pre-filled with "Gemini API Key", or "Name your project" in "Create a new project") to [targetValue].
+     */
+    suspend fun setDialogInputText(
+        targetValue: String = ProvisioningWebMath.TARGET_KEY_NAME,
+        labelHint: String = ""
+    ): Boolean {
+        val escapedName = JSONObject.quote(targetValue)
+        val escapedHint = JSONObject.quote(labelHint.lowercase())
         val js = """
             (function() {
                 var keyName = $escapedName;
-                var inputs = document.querySelectorAll('input, textarea');
+                var hintFilter = $escapedHint;
+                var inputs = Array.prototype.slice.call(document.querySelectorAll('input, textarea'));
+                var candidates = [];
                 for (var i = 0; i < inputs.length; i++) {
                     var el = inputs[i];
                     var type = (el.getAttribute('type') || 'text').toLowerCase();
-                    if (el.tagName === 'INPUT' && (type === 'checkbox' || type === 'radio' || type === 'hidden' || type === 'submit' || type === 'button')) {
+                    if (el.tagName === 'INPUT' && (type === 'checkbox' || type === 'radio' || type === 'hidden' || type === 'submit' || type === 'button' || type === 'search')) {
                         continue;
                     }
+                    if (el.disabled || el.readOnly) continue;
                     var r = el.getBoundingClientRect();
                     var style = window.getComputedStyle(el);
                     if (r.width < 30 || r.height < 16 || style.display === 'none' || style.visibility === 'hidden') {
                         continue;
                     }
-                    var hint = ((el.getAttribute('placeholder') || '') + ' ' + (el.getAttribute('aria-label') || '') + ' ' + (el.name || '')).toLowerCase();
-                    if (hint.indexOf('search') !== -1 || hint.indexOf('filter') !== -1 || hint.indexOf('project') !== -1) {
+                    var hint = ((el.getAttribute('placeholder') || '') + ' ' + (el.getAttribute('aria-label') || '') + ' ' + (el.name || '') + ' ' + (el.id || '')).toLowerCase();
+                    if (hint.indexOf('search') !== -1 || hint.indexOf('filter') !== -1) {
                         continue;
                     }
-                    if ((el.value || '').trim().length === 0) {
-                        var proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-                        var setter = Object.getOwnPropertyDescriptor(proto, 'value');
-                        if (setter && setter.set) setter.set.call(el, keyName); else el.value = keyName;
-                        el.dispatchEvent(new Event('input', { bubbles: true }));
-                        el.dispatchEvent(new Event('change', { bubbles: true }));
-                        return true;
-                    }
+                    var container = el.closest('[role="dialog"], mat-dialog-container, .cdk-overlay-pane, form') || el.parentElement;
+                    var containerText = (container && container.innerText) ? container.innerText.toLowerCase() : '';
+                    var score = 0;
+                    if (el.closest('[role="dialog"], mat-dialog-container, .cdk-overlay-pane')) score += 10;
+                    if (hintFilter && (hint.indexOf(hintFilter) !== -1 || containerText.indexOf(hintFilter) !== -1)) score += 20;
+                    candidates.push({ el: el, score: score, top: r.top });
                 }
-                return false;
+                if (candidates.length === 0) return false;
+                candidates.sort(function(a, b) {
+                    if (b.score !== a.score) return b.score - a.score;
+                    return b.top - a.top;
+                });
+                var target = candidates[0].el;
+                var currentVal = (target.value || '').trim();
+                if (currentVal.toLowerCase() === keyName.toLowerCase()) {
+                    return true;
+                }
+                try { target.focus(); } catch (e) {}
+                var proto = target.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+                var setter = Object.getOwnPropertyDescriptor(proto, 'value');
+                if (setter && setter.set) setter.set.call(target, keyName); else target.value = keyName;
+                target.dispatchEvent(new Event('input', { bubbles: true }));
+                target.dispatchEvent(new Event('change', { bubbles: true }));
+                try { target.blur(); } catch (e2) {}
+                return true;
             })();
         """.trimIndent()
         return evaluateJavascript(js) == "true"
+    }
+
+    /**
+     * Searches the `/api-keys` page specifically for an existing row containing [targetName] ("Rapcha 30frst").
+     * Never matches other projects/keys (like paid projects or plain "Rapcha").
+     * Returns either the row's inline copy button or the clickable row/cell itself to open "API key details".
+     */
+    suspend fun findNamedKeyRowTarget(
+        targetName: String = ProvisioningWebMath.TARGET_KEY_NAME
+    ): FindInPageMatch? {
+        val escapedTarget = JSONObject.quote(targetName.lowercase())
+        val js = """
+            (function() {
+                var target = $escapedTarget;
+                var vw = window.innerWidth || document.documentElement.clientWidth || 1;
+                var vh = window.innerHeight || document.documentElement.clientHeight || 1;
+
+                function isVisible(el) {
+                    if (!el) return false;
+                    var r = el.getBoundingClientRect();
+                    if (r.width < 6 || r.height < 6) return false;
+                    var s = window.getComputedStyle(el);
+                    if (!s || s.display === 'none' || s.visibility === 'hidden' || parseFloat(s.opacity || '1') <= 0.05) return false;
+                    return true;
+                }
+
+                // Do not match inside open creation modals
+                var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
+                var node;
+                while ((node = walker.nextNode())) {
+                    var val = (node.nodeValue || '').trim().toLowerCase();
+                    if (!val || val.indexOf(target) === -1) continue;
+                    var el = node.parentElement;
+                    if (!el || !isVisible(el)) continue;
+                    if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'MAT-OPTION') continue;
+                    var dialog = el.closest('[role="dialog"], mat-dialog-container');
+                    if (dialog) {
+                        var dText = (dialog.innerText || '').toLowerCase();
+                        if (dText.indexOf('create a new') !== -1 || dText.indexOf('name your') !== -1) continue;
+                    }
+
+                    // Look for the enclosing table row or card item
+                    var row = el.closest('tr, [role="row"], mat-row, cdk-row, li') || el.parentElement;
+                    if (row) {
+                        var buttons = row.querySelectorAll('button, [role="button"], a');
+                        for (var i = 0; i < buttons.length; i++) {
+                            var b = buttons[i];
+                            if (!isVisible(b)) continue;
+                            var bLabel = ((b.getAttribute('aria-label') || '') + ' ' + (b.getAttribute('title') || '') + ' ' + (b.getAttribute('mattooltip') || '') + ' ' + (b.innerText || '')).toLowerCase();
+                            if (bLabel.indexOf('copy') !== -1 || bLabel.indexOf('key') !== -1 || bLabel.indexOf('AIza') !== -1 || bLabel.indexOf('aq.') !== -1) {
+                                var br = b.getBoundingClientRect();
+                                var bcx = br.left + br.width / 2;
+                                var bcy = br.top + br.height / 2;
+                                return JSON.stringify({
+                                    label: 'row_copy',
+                                    nx: Math.max(0, Math.min(1000, Math.round((bcx / vw) * 1000))),
+                                    ny: Math.max(0, Math.min(1000, Math.round((bcy / vh) * 1000))),
+                                    inViewport: (bcx >= 0 && bcx <= vw && bcy >= 0 && bcy <= vh)
+                                });
+                            }
+                        }
+                    }
+
+                    var r = el.getBoundingClientRect();
+                    var cx = r.left + r.width / 2;
+                    var cy = r.top + r.height / 2;
+                    return JSON.stringify({
+                        label: val,
+                        nx: Math.max(0, Math.min(1000, Math.round((cx / vw) * 1000))),
+                        ny: Math.max(0, Math.min(1000, Math.round((cy / vh) * 1000))),
+                        inViewport: (cx >= 0 && cx <= vw && cy >= 0 && cy <= vh)
+                    });
+                }
+                return '';
+            })();
+        """.trimIndent()
+        val raw = unquoteJsJson(evaluateJavascript(js)).trim()
+        if (raw.isEmpty()) return null
+        return try {
+            val obj = JSONObject(raw)
+            FindInPageMatch(
+                index = 0,
+                label = obj.optString("label", targetName),
+                nx = obj.optInt("nx", 0),
+                ny = obj.optInt("ny", 0),
+                inViewport = obj.optBoolean("inViewport", true),
+                disabled = false,
+                tagName = "ROW"
+            )
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    /**
+     * Handles the "API key details" modal (Screenshot 4):
+     * Finds either the copy icon button next to "API Key" (AQ... / AIzaSy...) or the
+     * "Copy cURL quickstart" button at the bottom of the dialog.
+     */
+    suspend fun findApiKeyDetailsCopyTarget(): FindInPageMatch? {
+        val js = """
+            (function() {
+                var vw = window.innerWidth || document.documentElement.clientWidth || 1;
+                var vh = window.innerHeight || document.documentElement.clientHeight || 1;
+                var bodyText = (document.body && document.body.innerText) ? document.body.innerText.toLowerCase() : '';
+                if (bodyText.indexOf('api key details') === -1 && bodyText.indexOf('copy curl quickstart') === -1) {
+                    return '';
+                }
+
+                function isVisible(el) {
+                    if (!el) return false;
+                    var r = el.getBoundingClientRect();
+                    if (r.width < 8 || r.height < 8) return false;
+                    var s = window.getComputedStyle(el);
+                    return s && s.display !== 'none' && s.visibility !== 'hidden' && parseFloat(s.opacity || '1') > 0.05;
+                }
+
+                var root = document.querySelector('[role="dialog"], mat-dialog-container, .cdk-overlay-pane') || document.body;
+                var buttons = root.querySelectorAll('button, [role="button"]');
+
+                // 1. Prefer the "Copy cURL quickstart" button or the first copy icon next to "API Key" / "AQ." / "AIzaSy"
+                for (var i = 0; i < buttons.length; i++) {
+                    var b = buttons[i];
+                    if (!isVisible(b) || b.disabled) continue;
+                    var txt = ((b.innerText || '') + ' ' + (b.getAttribute('aria-label') || '') + ' ' + (b.getAttribute('title') || '')).toLowerCase();
+                    if (txt.indexOf('copy curl') !== -1) {
+                        var r = b.getBoundingClientRect();
+                        return JSON.stringify({
+                            label: 'copy_curl_quickstart',
+                            nx: Math.max(0, Math.min(1000, Math.round(((r.left + r.width / 2) / vw) * 1000))),
+                            ny: Math.max(0, Math.min(1000, Math.round(((r.top + r.height / 2) / vh) * 1000)))
+                        });
+                    }
+                }
+
+                // 2. Otherwise find the copy button nearest the "API Key" / "AQ." / "AIzaSy" line
+                for (var j = 0; j < buttons.length; j++) {
+                    var btn = buttons[j];
+                    if (!isVisible(btn) || btn.disabled) continue;
+                    var row = btn.parentElement;
+                    var rowText = (row && row.innerText) ? row.innerText : ((row && row.parentElement && row.parentElement.innerText) || '');
+                    if (rowText.indexOf('AQ.') !== -1 || rowText.indexOf('AIzaSy') !== -1 || rowText.toLowerCase().indexOf('api key') !== -1) {
+                        var br = btn.getBoundingClientRect();
+                        if (br.top > 80 && br.width < 120) {
+                            return JSON.stringify({
+                                label: 'api_key_copy_icon',
+                                nx: Math.max(0, Math.min(1000, Math.round(((br.left + br.width / 2) / vw) * 1000))),
+                                ny: Math.max(0, Math.min(1000, Math.round(((br.top + br.height / 2) / vh) * 1000)))
+                            });
+                        }
+                    }
+                }
+                return '';
+            })();
+        """.trimIndent()
+        val raw = unquoteJsJson(evaluateJavascript(js)).trim()
+        if (raw.isEmpty()) return null
+        return try {
+            val obj = JSONObject(raw)
+            FindInPageMatch(
+                index = 0,
+                label = obj.optString("label", "copy"),
+                nx = obj.optInt("nx", 0),
+                ny = obj.optInt("ny", 0),
+                inViewport = true,
+                disabled = false,
+                tagName = "BUTTON"
+            )
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    /**
+     * Inspects the "Create a new key" modal (Screenshot 2) to locate the project dropdown
+     * under "Choose an imported project" / "Select a Cloud Project" and checks whether
+     * [targetName] ("Rapcha 30frst") is already selected.
+     */
+    suspend fun findProjectSelectorInCreateKeyModal(
+        targetName: String = ProvisioningWebMath.TARGET_KEY_NAME
+    ): Pair<Boolean, FindInPageMatch?> {
+        val escapedTarget = JSONObject.quote(targetName.lowercase())
+        val js = """
+            (function() {
+                var target = $escapedTarget;
+                var vw = window.innerWidth || document.documentElement.clientWidth || 1;
+                var vh = window.innerHeight || document.documentElement.clientHeight || 1;
+                var dialog = document.querySelector('[role="dialog"], mat-dialog-container, .cdk-overlay-pane');
+                if (!dialog) return '';
+                var dText = (dialog.innerText || '').toLowerCase();
+                if (dText.indexOf('create a new key') === -1 && dText.indexOf('name your key') === -1 && dText.indexOf('choose an imported project') === -1 && dText.indexOf('select a cloud project') === -1) {
+                    return '';
+                }
+
+                var selectors = dialog.querySelectorAll('mat-select, [role="combobox"], [aria-haspopup="listbox"], select, .mat-mdc-select, .mat-mdc-form-field');
+                for (var i = 0; i < selectors.length; i++) {
+                    var el = selectors[i];
+                    if (el.querySelector('input, textarea')) continue;
+                    var r = el.getBoundingClientRect();
+                    var s = window.getComputedStyle(el);
+                    if (r.width < 60 || r.height < 24 || s.display === 'none' || s.visibility === 'hidden') continue;
+                    var text = (el.innerText || el.getAttribute('aria-label') || '').trim().toLowerCase();
+                    var alreadySelected = text.indexOf(target) !== -1;
+                    return JSON.stringify({
+                        alreadySelected: alreadySelected,
+                        label: text.substring(0, 80),
+                        nx: Math.max(0, Math.min(1000, Math.round(((r.left + r.width / 2) / vw) * 1000))),
+                        ny: Math.max(0, Math.min(1000, Math.round(((r.top + r.height / 2) / vh) * 1000)))
+                    });
+                }
+                return '';
+            })();
+        """.trimIndent()
+        val raw = unquoteJsJson(evaluateJavascript(js)).trim()
+        if (raw.isEmpty()) return false to null
+        return try {
+            val obj = JSONObject(raw)
+            val already = obj.optBoolean("alreadySelected", false)
+            val match = FindInPageMatch(
+                index = 0,
+                label = obj.optString("label", "project_dropdown"),
+                nx = obj.optInt("nx", 0),
+                ny = obj.optInt("ny", 0),
+                inViewport = true,
+                disabled = false,
+                tagName = "SELECT"
+            )
+            already to match
+        } catch (_: Throwable) {
+            false to null
+        }
     }
 
     suspend fun readBodyInnerText(): String {

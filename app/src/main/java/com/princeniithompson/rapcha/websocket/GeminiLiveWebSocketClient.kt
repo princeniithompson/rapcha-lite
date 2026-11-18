@@ -59,7 +59,8 @@ class GeminiLiveWebSocketClient(
     private val onPreviewPhase: (InterimPreviewMonitor.Phase) -> Unit = {},
     private val onPieceCommitted: (String) -> Unit = {},
     private val onGoAway: (Long?) -> Unit = {},
-    private val onAudiblePause: () -> Unit = {}
+    private val onAudiblePause: () -> Unit = {},
+    private val isNetworkAvailable: (() -> Boolean)? = null
 ) {
     companion object {
         private const val TAG = "GeminiLiveWS"
@@ -129,6 +130,7 @@ class GeminiLiveWebSocketClient(
             "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
         const val MAX_RECONNECT_ATTEMPTS = 10
         const val PING_INTERVAL_SECONDS = 45L
+        private const val NETWORK_OFFLINE_RECHECK_MS = 30_000L
 
         /**
          * The 10 minute clock lives in [DictationSessionClock], outside this
@@ -205,6 +207,7 @@ class GeminiLiveWebSocketClient(
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private var pendingReconnectRunnable: Runnable? = null
+    @Volatile private var waitingForNetwork = false
     private val activeTurnText = StringBuilder()
 
     private val activityStarted = AtomicBoolean(false)
@@ -538,6 +541,32 @@ class GeminiLiveWebSocketClient(
         }
 
         val sessionStillActive = true
+        val networkUp = isNetworkAvailable?.invoke() ?: true
+        if (!networkUp && lastApiKey.isNotBlank()) {
+            waitingForNetwork = true
+            Log.i(TAG, "[ConnectionState] Network unavailable; deferring WebSocket reconnect until connectivity returns")
+            notifyStateChanged(ConnectionState.Connecting)
+            cancelPendingReconnect()
+            val waitRunnable = Runnable {
+                if (isExplicitlyClosed.get() || !isSessionActive()) {
+                    waitingForNetwork = false
+                    isConnectingGuard.set(false)
+                    return@Runnable
+                }
+                if (isNetworkAvailable?.invoke() == true) {
+                    waitingForNetwork = false
+                    connectInternal()
+                } else {
+                    // Gently recheck in case a network callback was missed.
+                    pendingReconnectRunnable?.let { mainHandler.postDelayed(it, NETWORK_OFFLINE_RECHECK_MS) }
+                }
+            }
+            pendingReconnectRunnable = waitRunnable
+            mainHandler.postDelayed(waitRunnable, NETWORK_OFFLINE_RECHECK_MS)
+            return
+        }
+
+        waitingForNetwork = false
         val attempts = reconnectAttempts.incrementAndGet()
 
         if (lastApiKey.isNotBlank() && attempts <= MAX_RECONNECT_ATTEMPTS) {
@@ -899,6 +928,18 @@ class GeminiLiveWebSocketClient(
         Log.i(TAG, "audioStreamEnd suppressed; activityEnd is sent only when the user completes")
     }
 
+    fun notifyNetworkAvailable() {
+        if (!waitingForNetwork || isExplicitlyClosed.get() || !isSessionActive()) return
+        waitingForNetwork = false
+        cancelPendingReconnect()
+        mainHandler.post {
+            if (!isExplicitlyClosed.get() && isSessionActive() && !isSetupComplete.get()) {
+                Log.i(TAG, "[ConnectionState] Connectivity restored; resuming WebSocket reconnect")
+                connectInternal()
+            }
+        }
+    }
+
     fun disconnect() {
         if (!hasDisconnected.compareAndSet(false, true)) {
             Log.d(TAG, "[ConnectionState] disconnect() already invoked; skipping duplicate call")
@@ -906,6 +947,7 @@ class GeminiLiveWebSocketClient(
         }
         Log.i(TAG, "[ConnectionState] DISCONNECT requested by client (deterministic teardown)")
         isExplicitlyClosed.set(true)
+        waitingForNetwork = false
         reconnectAttempts.set(MAX_RECONNECT_ATTEMPTS)
         cancelPendingReconnect()
         pieceTimeout?.let { mainHandler.removeCallbacks(it) }
@@ -933,6 +975,11 @@ class GeminiLiveWebSocketClient(
             settleEndpoint(lastInterimText, timedOut = true)
         }
         closeExistingWebSocket()
+        synchronized(holdQueue) {
+            holdQueue.clear()
+        }
+        replayQueue.clear()
+        replayBytes = 0
 
         interimPreviewMonitor.stop()
         currentActiveClient.compareAndSet(this, null)

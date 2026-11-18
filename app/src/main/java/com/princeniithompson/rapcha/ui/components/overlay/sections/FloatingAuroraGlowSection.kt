@@ -5,15 +5,14 @@ import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.draw.drawWithCache
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.princeniithompson.rapcha.ui.components.overlay.AuroraColorPalette
@@ -40,16 +39,13 @@ fun FloatingAuroraGlowSection(
     modifier: Modifier = Modifier,
     content: @Composable BoxScope.() -> Unit
 ) {
-    var cachedSize by remember { mutableStateOf(Size.Zero) }
-    var cachedPath by remember { mutableStateOf<Path?>(null) }
-
     Box(
         modifier = modifier
             .fillMaxWidth()
             .padding(top = 22.dp)
-            .clip(notchedShape) // Strict clipping before drawBehind prevents any glow/aurora from leaking outside
-            .drawBehind {
-                val path = cachedPath?.takeIf { cachedSize == size } ?: createNotchedPath(
+            .clip(notchedShape) // Strict clipping before draw prevents any glow/aurora from leaking outside
+            .drawWithCache {
+                val path = createNotchedPath(
                     size = size,
                     density = this,
                     cornerRadius = cornerRadius,
@@ -57,30 +53,45 @@ fun FloatingAuroraGlowSection(
                     notchCenterOffsetX = notchCenterOffsetX,
                     notchCenterOffsetY = notchCenterOffsetY,
                     filletRadius = filletRadius
-                ).also {
-                    cachedSize = size
-                    cachedPath = it
-                }
+                )
                 val cx = size.width - notchCenterOffsetX.toPx()
                 val cy = notchCenterOffsetY.toPx()
-
-                val baseAmp = if (isRecording || state.mimicTalkingWhenSilent) state.effectiveAmp else 0.06f
-
-                drawNotchedOverlayBackground(
-                    path = path,
-                    palette = palette,
-                    glowPulse = state.glowPulse,
-                    cx = cx,
-                    cy = cy,
-                    styleId = glowStyleId,
-                    effectiveAmp = baseAmp,
-                    phase1 = state.phase1,
-                    phase2 = state.phase2,
-                    morphProgress = state.morphProgress,
-                    sunsetEntranceProgress = state.sunsetEntranceProgress,
-                    waitingLoopProgress = state.waitingLoopProgress,
-                    lowPower = state.lowPower
+                val notchBloomYOffsetPx = 12.dp.toPx()
+                val notchBloomRadiusPx = 48.dp.toPx()
+                val glassBrush = Brush.verticalGradient(
+                    colors = listOf(
+                        Color(0x800A1513),
+                        Color(0x94060F0E)
+                    )
                 )
+                val borderStroke = Stroke(
+                    width = 1.35.dp.toPx(),
+                    cap = StrokeCap.Round,
+                    join = StrokeJoin.Round
+                )
+
+                onDrawBehind {
+                    val baseAmp = if (isRecording || state.mimicTalkingWhenSilent) state.effectiveAmp else 0.06f
+                    drawNotchedOverlayBackground(
+                        path = path,
+                        palette = palette,
+                        glowPulse = state.glowPulse,
+                        cx = cx,
+                        cy = cy,
+                        styleId = glowStyleId,
+                        effectiveAmp = baseAmp,
+                        phase1 = state.phase1,
+                        phase2 = state.phase2,
+                        morphProgress = state.morphProgress,
+                        sunsetEntranceProgress = state.sunsetEntranceProgress,
+                        waitingLoopProgress = state.waitingLoopProgress,
+                        lowPower = state.lowPower,
+                        glassBrush = glassBrush,
+                        borderStroke = borderStroke,
+                        notchBloomYOffsetPx = notchBloomYOffsetPx,
+                        notchBloomRadiusPx = notchBloomRadiusPx
+                    )
+                }
             }
             .padding(top = 16.dp, bottom = 12.dp, start = 16.dp, end = 16.dp),
         content = content

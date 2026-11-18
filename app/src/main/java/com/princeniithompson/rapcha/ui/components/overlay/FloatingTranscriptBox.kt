@@ -18,6 +18,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -32,7 +33,7 @@ import androidx.compose.ui.unit.sp
 @Composable
 fun FloatingTranscriptBox(
     transcriptText: String,
-    cursorAlpha: Float,
+    cursorAlphaProvider: () -> Float,
     palette: AuroraColorPalette,
     scrollState: ScrollState,
     modifier: Modifier = Modifier
@@ -53,7 +54,8 @@ fun FloatingTranscriptBox(
                     modifier = Modifier
                         .width(2.dp)
                         .height(18.dp)
-                        .background(palette.primaryVibrant.copy(alpha = cursorAlpha))
+                        .graphicsLayer { alpha = cursorAlphaProvider() }
+                        .background(palette.primaryVibrant)
                 )
                 Spacer(modifier = Modifier.width(6.dp))
                 Text(
@@ -98,7 +100,8 @@ fun FloatingTranscriptBox(
                     modifier = Modifier
                         .width(2.dp)
                         .height(18.dp)
-                        .background(palette.primaryVibrant.copy(alpha = cursorAlpha))
+                        .graphicsLayer { alpha = cursorAlphaProvider() }
+                        .background(palette.primaryVibrant)
                 )
             }
         }

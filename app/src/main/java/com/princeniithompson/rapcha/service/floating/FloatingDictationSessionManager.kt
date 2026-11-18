@@ -1,6 +1,13 @@
 package com.princeniithompson.rapcha.service.floating
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
 import android.util.Log
@@ -24,6 +31,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.ArrayDeque
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * One SMART Gemini Live session: mic -> ordered send queue -> WebSocket -> transcript.
@@ -47,6 +55,7 @@ class FloatingDictationSessionManager(
 ) {
     companion object {
         private const val TAG = "FloatingDictationMgr"
+        const val MIC_ERROR_PREFIX = "MICROPHONE_ERROR:"
         /** ~15 s of 100 ms chunks held while the socket connects or reconnects. */
         const val MAX_AUDIO_QUEUE_CHUNKS = 150
         /** Mic keeps reading this long after Complete so the last word is not clipped. */
@@ -80,6 +89,11 @@ class FloatingDictationSessionManager(
     private var durationJob: Job? = null
     private var stopJob: Job? = null
 
+    private val activeSessionId = AtomicLong(0L)
+    private val mainHandler = Handler(Looper.getMainLooper())
+    @Volatile private var activeCallerScope: CoroutineScope? = null
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+
     var durationSeconds: Int = 0
         private set
 
@@ -101,7 +115,15 @@ class FloatingDictationSessionManager(
         onAmplitudeChanged = { amp -> onAmplitudeChanged(if (isRecording) amp.coerceIn(0f, 1f) else 0f) },
         onError = { err ->
             Log.e(TAG, "AudioRecorder error: $err")
-            DictationAlerts.microphoneFailed(context)
+            val failedSessionId = activeSessionId.get()
+            mainHandler.post {
+                if (failedSessionId != activeSessionId.get() || !isRecording) return@post
+                val cleanupScope = activeCallerScope ?: CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+                onError("$MIC_ERROR_PREFIX$err")
+                if (failedSessionId == activeSessionId.get() && isRecording) {
+                    stopSession(cleanupScope, "microphone_error")
+                }
+            }
         }
     )
 
@@ -119,7 +141,9 @@ class FloatingDictationSessionManager(
         smartMode: Boolean
     ) {
         if (isRecording) return
+        val sessionId = activeSessionId.incrementAndGet()
         isRecording = true
+        activeCallerScope = scope
 
         sessionJob?.cancel()
         val sJob = SupervisorJob()
@@ -135,6 +159,7 @@ class FloatingDictationSessionManager(
         sessionStartedAtElapsed = SystemClock.elapsedRealtime()
         durationSeconds = 0
         sender.reset()
+        registerNetworkCallback()
 
         try {
             val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -151,8 +176,9 @@ class FloatingDictationSessionManager(
 
         audioRecorder.start()
 
-        webSocketClient = GeminiLiveWebSocketClient(
+        val client = GeminiLiveWebSocketClient(
             onSetupComplete = {
+                if (sessionId != activeSessionId.get()) return@GeminiLiveWebSocketClient
                 com.princeniithompson.rapcha.core.ApiKeyVault.markApiKeyVerified(context, apiKey)
                 FloatingBubbleManager.setNetworkProblem(false)
                 val ws = webSocketClient
@@ -162,16 +188,19 @@ class FloatingDictationSessionManager(
                 }
             },
             onInterimTranscription = { text ->
+                if (sessionId != activeSessionId.get()) return@GeminiLiveWebSocketClient
                 interimTranscript = text
                 onInterimReceived(text)
                 onTranscriptUpdated(getFullTranscriptText())
             },
             onPieceCommitted = { piece ->
+                if (sessionId != activeSessionId.get()) return@GeminiLiveWebSocketClient
                 appendPiece(piece)
                 interimTranscript = ""
                 onTranscriptUpdated(getFullTranscriptText())
             },
             onGoAway = {
+                if (sessionId != activeSessionId.get()) return@GeminiLiveWebSocketClient
                 refreshDurationFromClock()
                 if (sessionClock.shouldSplitOnGoAway(durationSeconds * 1000L)) {
                     webSocketClient?.requestFreshConnectionSplit()
@@ -180,11 +209,13 @@ class FloatingDictationSessionManager(
                 }
             },
             onAudiblePause = {
+                if (sessionId != activeSessionId.get()) return@GeminiLiveWebSocketClient
                 if (finishAtNextPause && isRecording) {
                     onSessionLimit("Session ended at 10 minutes.", true)
                 }
             },
             onFinalizedTranscription = { text ->
+                if (sessionId != activeSessionId.get()) return@GeminiLiveWebSocketClient
                 val trimmed = text.trim()
                 appendPiece(trimmed)
                 interimTranscript = ""
@@ -192,6 +223,7 @@ class FloatingDictationSessionManager(
                 onTranscriptUpdated(getFullTranscriptText())
             },
             onStateChanged = { state ->
+                if (sessionId != activeSessionId.get()) return@GeminiLiveWebSocketClient
                 val isProblem = (state is ConnectionState.Error) ||
                     (state is ConnectionState.Connecting && (webSocketClient?.isReconnecting == true))
                 FloatingBubbleManager.setNetworkProblem(isProblem)
@@ -199,11 +231,13 @@ class FloatingDictationSessionManager(
             },
             onLog = { _, _, _, _ -> },
             onError = { err ->
+                if (sessionId != activeSessionId.get()) return@GeminiLiveWebSocketClient
                 Log.e(TAG, "WebSocket error: $err")
                 FloatingBubbleManager.setNetworkProblem(true)
                 onError(err)
             },
             onStructuredError = { structured ->
+                if (sessionId != activeSessionId.get()) return@GeminiLiveWebSocketClient
                 if (structured is com.princeniithompson.rapcha.websocket.GeminiLiveError.MissingApiKey) {
                     com.princeniithompson.rapcha.core.ApiKeyVault.markApiKeyInvalid(
                         context = context,
@@ -211,23 +245,35 @@ class FloatingDictationSessionManager(
                     )
                 }
             },
-            isSessionActive = { isRecording },
+            isSessionActive = { isRecording && sessionId == activeSessionId.get() },
             diagnosticSource = DiagnosticSource.BUBBLE,
-            onPreviewPhase = onPreviewPhase
-        ).apply {
-            val customVocab = CustomVocabularyRepository.getVocabulary()
-            try {
-                connect(apiKey = apiKey, model = model, smartMode = smartMode, customVocabulary = customVocab)
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to connect WebSocket: ${e.message}")
-                FloatingBubbleManager.setNetworkProblem(true)
-                onError(e.message ?: "Connection error")
+            onPreviewPhase = { phase ->
+                if (sessionId == activeSessionId.get()) {
+                    onPreviewPhase(phase)
+                }
+            },
+            isNetworkAvailable = { isNetworkAvailableNow() }
+        )
+        webSocketClient = client
+
+        val customVocab = CustomVocabularyRepository.getVocabulary()
+        try {
+            client.connect(apiKey = apiKey, model = model, smartMode = smartMode, customVocabulary = customVocab)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to connect WebSocket: ${e.message}")
+            FloatingBubbleManager.setNetworkProblem(true)
+            onError(e.message ?: "Connection error")
+            if (sessionId == activeSessionId.get() && isRecording) {
+                stopSession(scope, "connect_exception")
             }
+            return
         }
+
+        if (sessionId != activeSessionId.get() || !isRecording) return
 
         durationJob?.cancel()
         durationJob = sessionScope.launch {
-            while (isActive && isRecording) {
+            while (isActive && isRecording && sessionId == activeSessionId.get()) {
                 delay(1000)
                 refreshDurationFromClock()
                 webSocketClient?.pollInterimPreview()
@@ -243,8 +289,11 @@ class FloatingDictationSessionManager(
 
     /** Cancel path: drop the mic and the socket without waiting for a transcript. */
     fun stopSession(scope: CoroutineScope, endedReason: String = "completed") {
-        if (!isRecording) return
+        if (!isRecording && webSocketClient == null && wakeLock == null && sessionJob == null) return
+        activeSessionId.incrementAndGet()
         isRecording = false
+        activeCallerScope = null
+        unregisterNetworkCallback()
         FloatingBubbleManager.setNetworkProblem(false)
         durationJob?.cancel()
         durationJob = null
@@ -316,6 +365,10 @@ class FloatingDictationSessionManager(
             Log.e(TAG, "Error finishing manual activity", e)
             getFullTranscriptText()
         } finally {
+            activeSessionId.incrementAndGet()
+            isRecording = false
+            activeCallerScope = null
+            unregisterNetworkCallback()
             try {
                 ws?.disconnect()
             } catch (e: Exception) {
@@ -379,7 +432,10 @@ class FloatingDictationSessionManager(
     }
 
     fun release() {
+        activeSessionId.incrementAndGet()
         isRecording = false
+        activeCallerScope = null
+        unregisterNetworkCallback()
         FloatingBubbleManager.setNetworkProblem(false)
         durationJob?.cancel()
         durationJob = null
@@ -394,6 +450,60 @@ class FloatingDictationSessionManager(
             wakeLock = null
         } catch (e: Exception) {
             Log.w(TAG, "Error releasing session manager", e)
+        }
+    }
+
+    private fun isNetworkAvailableNow(): Boolean {
+        return try {
+            val cm = context.applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+                ?: return true
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                val network = cm.activeNetwork ?: return false
+                val caps = cm.getNetworkCapabilities(network) ?: return false
+                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            } else {
+                @Suppress("DEPRECATION")
+                cm.activeNetworkInfo?.isConnected == true
+            }
+        } catch (_: Throwable) {
+            true
+        }
+    }
+
+    private fun registerNetworkCallback() {
+        if (networkCallback != null) return
+        try {
+            val cm = context.applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+                ?: return
+            val callback = object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    if (isRecording) {
+                        webSocketClient?.notifyNetworkAvailable()
+                    }
+                }
+
+                override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
+                    if (isRecording && networkCapabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) {
+                        webSocketClient?.notifyNetworkAvailable()
+                    }
+                }
+            }
+            val request = NetworkRequest.Builder()
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .build()
+            cm.registerNetworkCallback(request, callback)
+            networkCallback = callback
+        } catch (_: Throwable) {
+        }
+    }
+
+    private fun unregisterNetworkCallback() {
+        val cb = networkCallback ?: return
+        networkCallback = null
+        try {
+            val cm = context.applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+            cm?.unregisterNetworkCallback(cb)
+        } catch (_: Throwable) {
         }
     }
 }

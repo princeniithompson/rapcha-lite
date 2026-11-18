@@ -47,6 +47,8 @@ object GlowAnimationCatalogue {
     fun getById(@Suppress("UNUSED_PARAMETER") id: String): GlowAnimationStyle = styles.first()
 }
 
+private val glowLayerPaintLocal = ThreadLocal.withInitial { Paint() }
+
 /**
  * Master renderer for all glowing container animations.
  * Completely hardware accelerated within Compose DrawScope.
@@ -85,7 +87,8 @@ fun DrawScope.renderGlowAnimation(
             drawContent()
         } else {
             val layerRect = Rect(leftX, topY, rightX, bottomY)
-            drawContext.canvas.saveLayer(layerRect, Paint())
+            val layerPaint = glowLayerPaintLocal.get() ?: Paint()
+            drawContext.canvas.saveLayer(layerRect, layerPaint)
             drawContent()
             val featherRatio = (36.dp.toPx() / blockW).coerceIn(0.12f, 0.30f)
             drawRect(

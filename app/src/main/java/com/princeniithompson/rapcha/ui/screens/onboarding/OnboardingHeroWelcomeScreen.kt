@@ -36,7 +36,11 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -56,6 +60,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.princeniithompson.rapcha.R
 import com.princeniithompson.rapcha.ui.theme.EditorialSerifFontFamily
 import kotlin.math.PI
@@ -74,47 +81,71 @@ fun OnboardingHeroWelcomeScreen(
     onGetStarted: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val infiniteTransition = rememberInfiniteTransition(label = "hero_welcome_anim")
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var isResumed by remember(lifecycleOwner) {
+        mutableStateOf(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
+    }
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, _ ->
+            isResumed = lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
-    val ambientDriftState = infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = (2f * PI).toFloat(),
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 12_000, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "ambient_drift"
-    )
+    var ambientDriftProvider: () -> Float = { 0f }
+    var wavePhaseProvider: () -> Float = { 0f }
+    var marqueeCycleProvider: () -> Float = { 0f }
+    var pillPulseProvider: () -> Float = { 1f }
 
-    val wavePhaseState = infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = (2f * PI).toFloat(),
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 1_800, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "wave_phase"
-    )
+    if (isResumed) {
+        val infiniteTransition = rememberInfiniteTransition(label = "hero_welcome_anim")
 
-    val marqueeCycleState = infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = 3f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 15_000, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "marquee_cycle"
-    )
+        val ambientDriftState = infiniteTransition.animateFloat(
+            initialValue = 0f,
+            targetValue = (2f * PI).toFloat(),
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 12_000, easing = LinearEasing),
+                repeatMode = RepeatMode.Restart
+            ),
+            label = "ambient_drift"
+        )
 
-    val pillPulseState = infiniteTransition.animateFloat(
-        initialValue = 0.94f,
-        targetValue = 1.04f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 1_600, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "pill_pulse"
-    )
+        val wavePhaseState = infiniteTransition.animateFloat(
+            initialValue = 0f,
+            targetValue = (2f * PI).toFloat(),
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 1_800, easing = LinearEasing),
+                repeatMode = RepeatMode.Restart
+            ),
+            label = "wave_phase"
+        )
+
+        val marqueeCycleState = infiniteTransition.animateFloat(
+            initialValue = 0f,
+            targetValue = 3f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 15_000, easing = LinearEasing),
+                repeatMode = RepeatMode.Restart
+            ),
+            label = "marquee_cycle"
+        )
+
+        val pillPulseState = infiniteTransition.animateFloat(
+            initialValue = 0.94f,
+            targetValue = 1.04f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 1_600, easing = FastOutSlowInEasing),
+                repeatMode = RepeatMode.Reverse
+            ),
+            label = "pill_pulse"
+        )
+
+        ambientDriftProvider = { ambientDriftState.value }
+        wavePhaseProvider = { wavePhaseState.value }
+        marqueeCycleProvider = { marqueeCycleState.value }
+        pillPulseProvider = { pillPulseState.value }
+    }
 
     val marqueeSentences = remember {
         listOf(
@@ -212,7 +243,7 @@ fun OnboardingHeroWelcomeScreen(
                     onDrawBehind {
                         drawRect(brush = baseGradient)
 
-                        val drift = ambientDriftState.value.toDouble()
+                        val drift = ambientDriftProvider().toDouble()
                         val upperX = w * (0.48f + 0.14f * cos(drift).toFloat())
                         val upperY = h * (0.46f + 0.08f * sin(drift).toFloat())
                         val upperCenter = Offset(upperX, upperY)
@@ -345,7 +376,7 @@ fun OnboardingHeroWelcomeScreen(
                             val pathLengthApprox = w * 1.78f
 
                             onDrawBehind {
-                                val cycle = marqueeCycleState.value
+                                val cycle = marqueeCycleProvider()
                                 val activeIndex = cycle.toInt().coerceIn(0, marqueeSentences.lastIndex)
                                 val localProgress = cycle - activeIndex
                                 val sentence = marqueeSentences[activeIndex]
@@ -391,7 +422,7 @@ fun OnboardingHeroWelcomeScreen(
                         .padding(top = if (isCompactHeight) 36.dp else 54.dp)
                         .size(width = pillWidth, height = pillHeight)
                         .graphicsLayer {
-                            val scale = pillPulseState.value
+                            val scale = pillPulseProvider()
                             scaleX = scale
                             scaleY = scale
                         }
@@ -402,7 +433,7 @@ fun OnboardingHeroWelcomeScreen(
                         val slotW = totalW / barCount
                         val barW = slotW * 0.44f
                         val centerY = size.height / 2f
-                        val wavePhase = wavePhaseState.value
+                        val wavePhase = wavePhaseProvider()
                         val minBarH = 4.dp.toPx()
                         val barColor = Color.White.copy(alpha = 0.95f)
                         val barRadius = CornerRadius(barW / 2f, barW / 2f)

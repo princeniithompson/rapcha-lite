@@ -80,6 +80,7 @@ class BubbleRecoveryJobService : JobService() {
                 "already_running"
             }
             else -> {
+                BubbleHealthLog.resetJobSuccessStreak(app)
                 val started = FloatingBubbleManager.startBubbleService(app, source = "recovery_job")
                 BubbleHealthLog.recordJobOutcome(app, startedOrRunning = started)
                 if (started) "started" else "refused"

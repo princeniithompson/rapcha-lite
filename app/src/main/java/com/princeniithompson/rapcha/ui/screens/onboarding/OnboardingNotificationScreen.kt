@@ -29,9 +29,11 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -59,9 +61,21 @@ import com.princeniithompson.rapcha.ui.theme.OnboardingMutedText
 @Composable
 fun OnboardingNotificationScreen(
     onFinish: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    isApiKeyReady: Boolean = true,
+    isActivatingKey: Boolean = false,
+    statusMessage: String = "",
+    onRetryKeySetup: () -> Unit = {}
 ) {
     var showAllSet by remember { mutableStateOf(false) }
+    var waitingForKeyToFinish by remember { mutableStateOf(false) }
+
+    LaunchedEffect(waitingForKeyToFinish, isApiKeyReady) {
+        if (waitingForKeyToFinish && isApiKeyReady) {
+            waitingForKeyToFinish = false
+            onFinish()
+        }
+    }
 
     val notificationLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
@@ -242,13 +256,52 @@ fun OnboardingNotificationScreen(
                                 modifier = Modifier.size(76.dp)
                             )
                         }
+
+                        if (!isApiKeyReady) {
+                            Spacer(modifier = Modifier.height(20.dp))
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("onboarding_key_activation_status"),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.Center
+                            ) {
+                                if (isActivatingKey || waitingForKeyToFinish) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(18.dp),
+                                        strokeWidth = 2.dp,
+                                        color = OnboardingInkBlack
+                                    )
+                                    Spacer(modifier = Modifier.width(10.dp))
+                                }
+                                Text(
+                                    text = when {
+                                        isActivatingKey || waitingForKeyToFinish ->
+                                            "Activating your Rapcha 30frst voice key..."
+                                        statusMessage.isNotBlank() -> statusMessage
+                                        else -> "Tap below to finish activating your voice key."
+                                    },
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = OnboardingInkBlack,
+                                    textAlign = TextAlign.Center
+                                )
+                            }
+                        }
                     }
                 }
 
                 Spacer(modifier = Modifier.height(24.dp))
 
                 Button(
-                    onClick = onFinish,
+                    onClick = {
+                        if (isApiKeyReady) {
+                            onFinish()
+                        } else {
+                            waitingForKeyToFinish = true
+                            onRetryKeySetup()
+                        }
+                    },
                     shape = RoundedCornerShape(14.dp),
                     border = BorderStroke(1.5.dp, OnboardingBorderStroke),
                     colors = ButtonDefaults.buttonColors(
@@ -260,7 +313,12 @@ fun OnboardingNotificationScreen(
                         .heightIn(min = 54.dp)
                         .testTag("btn_onboarding_finish")
                 ) {
-                    Text("Finish", fontSize = 17.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onPrimaryContainer)
+                    val buttonText = when {
+                        isApiKeyReady -> "Finish"
+                        isActivatingKey || waitingForKeyToFinish -> "Activating Voice Key..."
+                        else -> "Activate Voice Key & Finish"
+                    }
+                    Text(buttonText, fontSize = 17.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onPrimaryContainer)
                 }
             }
         }

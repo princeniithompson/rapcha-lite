@@ -11,13 +11,16 @@ import com.princeniithompson.rapcha.ui.components.overlay.FloatingTranscriptBox
  */
 object FloatingTranscriptFormatter {
 
+    private val MULTI_SPACE_REGEX = Regex("[ \\t]{2,}")
+    private val WHITESPACE_REGEX = Regex("\\s+")
+
     /**
      * Sanitizes and normalizes the raw transcript stream for clean display:
      * - Preserves single spaces and newlines while collapsing excess consecutive spaces
      */
     fun formatTranscriptForDisplay(rawText: String): String {
         if (rawText.isEmpty()) return ""
-        return rawText.replace(Regex("[ \\t]{2,}"), " ")
+        return rawText.replace(MULTI_SPACE_REGEX, " ")
     }
 
     /**
@@ -36,7 +39,7 @@ object FloatingTranscriptFormatter {
      */
     fun countWords(text: String): Int {
         if (text.isBlank()) return 0
-        return text.trim().split(Regex("\\s+")).size
+        return text.trim().split(WHITESPACE_REGEX).size
     }
 
     /**
@@ -54,7 +57,7 @@ object FloatingTranscriptFormatter {
 @Composable
 fun FloatingTranscriptSection(
     transcriptText: String,
-    cursorAlpha: Float,
+    cursorAlphaProvider: () -> Float,
     palette: AuroraColorPalette,
     scrollState: ScrollState,
     modifier: Modifier = Modifier
@@ -63,7 +66,7 @@ fun FloatingTranscriptSection(
 
     FloatingTranscriptBox(
         transcriptText = formattedText,
-        cursorAlpha = cursorAlpha,
+        cursorAlphaProvider = cursorAlphaProvider,
         palette = palette,
         scrollState = scrollState,
         modifier = modifier

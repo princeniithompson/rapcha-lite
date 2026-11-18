@@ -1,0 +1,468 @@
+RAPCHA LITE — COMPLETE BATTERY CONSUMPTION CODE AUDIT
+========================================================
+
+Audit Scope & Method Disclosure
+-------------------------------
+- Target Repository: https://github.com/princeniithompson/rapcha-lite (workspace source code)
+- Audit Type: STATIC SOURCE-CODE INSPECTION ONLY (zero application files were modified, built, or executed).
+- Hardware/Runtime Tools Used: None. No Android Studio Energy Profiler, Battery Historian, Perfetto trace, or physical-device battery drain measurement was executed in this environment. Any real-world battery percentage or milliamp-hour impact that depends on CPU scheduling, radio power states, screen refresh rates, or OEM power management is explicitly labeled: NEEDS RUNTIME MEASUREMENT.
+- Language Note: Written in plain, everyday English. Whenever a technical Android term is unavoidable, it is explained immediately right beside the term.
+
+
+========================================================================
+1. OVERALL ASSESSMENT
+========================================================================
+
+Rapcha Lite shows a strong, deliberate effort by its authors to keep battery and memory usage under control—especially compared to earlier versions ("v23", "v25 lean", "v26") referenced throughout the code comments. For example, when the floating bubble is resting on screen, it uses a lightweight native Android icon instead of a full Jetpack Compose interface; it pauses overlay animation frames when hidden; it automatically turns off heavy visual effects on budget/low-RAM phones; and it turns off disk log-file writing completely.
+
+However, the audit uncovered two HIGH-risk issues and several MEDIUM-risk background habits that can noticeably drain battery in real-world use:
+
+1. A failure-cleanup bug during microphone startup can leave a 30-minute CPU stay-awake lock (WakeLock), a 1-second timer, a live internet socket, and an active microphone foreground service running for up to 10 minutes even though the microphone never opened.
+2. Continuous background "safety check" loops—specifically a loop running every 5 seconds inside the bubble service and a 15-minute scheduled wake-up job that never stops rescheduling itself—keep checking phone settings repeatedly, even when everything is healthy. Combined with Rapcha asking the user to exempt it from Android's battery-saving limits ("Keep Awake"), the phone cannot defer or quiet these checks as aggressively as it normally would.
+3. During active dictation, the default "Words" bubble still redraws and rebuilds its entire UI tree on every screen frame (60 to 120 times per second), which works the processor and graphics chip harder on budget phones than the newer "Mini" pill bubble.
+
+Overall Rating:
+- Active Dictation (Normal Operation): Reasonable for a live cloud voice-typing app, though using the "Words" bubble costs noticeably more GPU/CPU work than the "Mini" pill. NEEDS RUNTIME MEASUREMENT on a physical device.
+- Idle Use (Normal Operation): Mostly lightweight visually, but unnecessarily chatty in the background because of the 5-second/10-second check loop, the permanent 15-minute scheduled job, and frequent Accessibility window checks. NEEDS RUNTIME MEASUREMENT.
+- Error / Edge-Case Safety: Needs fixing on microphone-failure cleanup so power locks cannot get stuck on.
+
+
+========================================================================
+2. MOST IMPORTANT FINDINGS (SUMMARY)
+========================================================================
+
+- [HIGH] Finding 1: Microphone startup failure leaves the CPU stay-awake lock (WakeLock), 1-second clock loop, live WebSocket connection, and Microphone service active for up to 10 minutes instead of shutting them down.
+- [HIGH] Finding 2: A background check loop runs every 5 seconds (and an accessibility check runs every 10 seconds) endlessly while the service is alive, reading shared settings and Android system settings over and over—and does not stop ticking when the screen turns off.
+- [MEDIUM-HIGH] Finding 3: A 15-minute "recovery job" (JobScheduler) is supposed to stop checking after 3 healthy runs in a row, but its rule currently ignores that counter and reschedules itself forever—even across device reboots.
+- [HIGH / MEDIUM] Finding 4: The default "Words" dictation bubble rebuilds its UI elements on every screen frame (60–120 times a second) during recording AND when shown in the Home screen auto-scrolling preview, whereas the "Mini" bubble avoids rebuilding its widgets each frame.
+- [MEDIUM] Finding 5: Asking the user to turn off Android battery optimizations ("Keep Rapcha Awake" / Unrestricted battery mode) prevents Android Doze and App Standby from throttling Rapcha's periodic checks, magnifying the cost of Findings 2 and 3.
+- [MEDIUM] Finding 6: The Accessibility Service schedules an extra window inspection 250 milliseconds after almost every app switch or popup even when the keyboard is closed, and asks Android to include "non-important" screen views in its accessibility tree data.
+- [MEDIUM] Finding 7: During active dictation in a dead or weak internet area, the app retries reconnecting up to 10 times with exponential waits (up to 30.5 seconds between tries) and sends WebSocket keep-alive "ping" packets every 45 seconds.
+- [LOW-MEDIUM] Finding 8: The hidden Chromium browser (WebView) used to set up a Gemini API key stays alive in memory if setup is incomplete or key verification fails, and listens to clipboard changes until torn down.
+- [LOW] Finding 9: Routine small settings writes (SharedPreferences) and continuous idle animations on the Onboarding Welcome screen and Home preview carousel add minor extra work while those app screens are open.
+
+
+========================================================================
+3. DETAILED FINDINGS
+========================================================================
+
+------------------------------------------------------------------------
+Finding 1: Microphone Startup Failure Leaks WakeLock, WebSocket, Timer, and Active UI
+------------------------------------------------------------------------
+- Severity: HIGH
+- File path:
+  - app/src/main/java/com/princeniithompson/rapcha/service/floating/FloatingDictationSessionManager.kt
+  - app/src/main/java/com/princeniithompson/rapcha/audio/AudioRecorder.kt
+  - app/src/main/java/com/princeniithompson/rapcha/service/FloatingBubbleService.kt
+- Class / Function:
+  - FloatingDictationSessionManager.startSession (lines 114–238) and audioRecorder onError callback (lines 97–106)
+  - AudioRecorder.runCapture (lines 113–193) and openStartedRecorder (lines 201–235)
+  - FloatingBubbleService.startVoiceTyping (lines 601–658)
+- What the code does:
+  When the user taps the floating bubble to dictate, FloatingBubbleService promotes itself to an active "Microphone" foreground service (a high-priority state that tells Android the mic is actively in use) and calls sessionManager.startSession(). Inside startSession():
+  1. It sets isRecording = true (line 122).
+  2. It grabs a PARTIAL_WAKE_LOCK for up to 30 minutes (lines 139–147)—this is a power lock that forbids the phone's CPU from going to sleep even if the screen turns off.
+  3. It starts AudioRecorder on a high-priority audio thread (line 152).
+  4. It opens a live Gemini WebSocket internet connection (lines 154–226).
+  5. It starts a 1-second timer loop that runs while isRecording is true (lines 228–237).
+
+  Inside AudioRecorder.runCapture(), if the microphone is busy (for example, held by a phone call or another app) or fails to initialize, it logs an error and triggers AudioRecorder's onError callback (AudioRecorder.kt lines 121–135, 151–163). However, inside FloatingDictationSessionManager, the AudioRecorder onError callback (lines 102–105) ONLY logs the error and posts a notification ("microphoneFailed"). It does NOT call stopSession(), does NOT call FloatingDictationSessionManager.onError, does NOT release the 30-minute WakeLock, and does NOT close the WebSocket.
+- Why it matters in plain English:
+  If the microphone fails to start, recording is broken, yet the phone's CPU is locked awake, the screen overlay stays expanded and animating, the 1-second loop keeps ticking, the live internet socket keeps pinging every 45 seconds, and the Microphone service status stays active—potentially for up to 10 minutes (until the 10-minute session timer forces a hard stop)—until the user manually taps Cancel or Complete.
+- When it happens:
+  Whenever microphone opening or reading fails right after tapping the bubble (for example, another app or call is using the microphone, audio driver error, or Android blocks mic capture mid-session).
+- Evidence from source:
+  - FloatingDictationSessionManager.kt:97-106 (audioRecorder's onError only calls DictationAlerts.microphoneFailed(context); never invokes sessionManager's onError or stopSession).
+  - FloatingDictationSessionManager.kt:122, 139-147, 152-237 (WakeLock 30 * 60 * 1000L acquired, WebSocket opened, and 1000ms durationJob launched unconditionally).
+  - AudioRecorder.kt:120-135, 151-163 (exits capture thread after calling onError when minBufferSize <= 0, openStartedRecorder == null, or read < 0).
+  - FloatingBubbleService.kt:626-657 (Microphone foreground service promoted before startSession, and overlay remains expanded).
+- Recommended investigation or improvement:
+  Forward AudioRecorder.onError to FloatingDictationSessionManager's fatal error handler (or stopSession) on the main thread so the WakeLock, WebSocket, Microphone foreground state, duration timer, and expanded overlay are shut down immediately whenever the microphone fails.
+
+------------------------------------------------------------------------
+Finding 2: Continuous 5-Second / 10-Second Watchdog Loop Reads Settings Repeatedly
+------------------------------------------------------------------------
+- Severity: HIGH
+- File path:
+  - app/src/main/java/com/princeniithompson/rapcha/service/FloatingBubbleService.kt
+  - app/src/main/java/com/princeniithompson/rapcha/service/BubbleRecoveryPolicies.kt
+  - app/src/main/java/com/princeniithompson/rapcha/service/A11yWatchdog.kt
+  - app/src/main/java/com/princeniithompson/rapcha/service/FloatingBubbleManager.kt
+- Class / Function:
+  - FloatingBubbleService.startWatchdogs (lines 372–441)
+  - VisibilityWatchdogDecision.onTick (BubbleRecoveryPolicies.kt lines 95–134)
+  - A11yWatchdog.check (A11yWatchdog.kt lines 108–174)
+  - FloatingBubbleManager.isBubbleEnabledSync / isAccessibilityServiceEnabled (lines 141–182)
+- What the code does:
+  Once FloatingBubbleService starts, startWatchdogs() runs an infinite while (isActive) loop on the main app thread with delay(5_000L).
+  Every 5 seconds:
+  - It opens/reads SharedPreferences (app settings storage) via FloatingBubbleManager.isBubbleEnabledSync(this).
+  - It queries Android's system overlay permission via Settings.canDrawOverlays(this).
+  - It checks overlay attachment and visibility.
+  Every 10 seconds (every second loop tick):
+  - It calls A11yWatchdog.check(), which reads SharedPreferences twice more (isBubbleEnabledSync + BubbleHealthLog.isInPostUpdateGraceWindow) AND queries Android's system database (Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES via ContentResolver) and parses the returned string to verify Rapcha's accessibility service is turned on.
+
+  Note on screen-off behavior: When the screen turns off, VisibilityWatchdogDecision.onTick returns OK immediately without trying to rebuild the overlay, WHICH IS GOOD. However, the 5-second while (isActive) loop itself NEVER pauses or cancels when the screen turns off! Because Kotlin delay() uses Android's Handler uptime timer, it will not wake a phone from true deep CPU sleep by itself—HOWEVER, anytime the CPU is awake (screen on idle, listening to music, receiving notifications, background syncing, or screen on during normal phone use), Rapcha wakes its main thread every 5 seconds and queries system settings over inter-process calls (Binder/ContentResolver) every 5–10 seconds, all day long.
+- Why it matters in plain English:
+  Checking every 5 seconds that a user hasn't flipped a switch in Android Settings or that a window hasn't vanished forces repeated micro-wakeups of Rapcha's process and cross-process communication with Android's system settings server whenever the phone is awake, even when the user is just reading a web page or watching a video with no keyboard open. NEEDS RUNTIME MEASUREMENT to quantify exact CPU/wakelock % across a 24-hour day.
+- When it happens:
+  Continuously for the entire lifetime of FloatingBubbleService whenever the floating bubble feature is enabled.
+- Evidence from source:
+  - FloatingBubbleService.kt:372-441 (while (isActive) { delay(5_000L) ... every tick calls isBubbleEnabledSync & canDrawOverlays; tickCounter % 2 == 0 calls A11yWatchdog.check }).
+  - BubbleRecoveryPolicies.kt:95-120 (WATCHDOG_INTERVAL_MS = 5_000L).
+  - A11yWatchdog.kt:108-114 (check() reads isBubbleEnabledSync, isAccessibilityServiceEnabled, and isInPostUpdateGraceWindow every 10s).
+  - FloatingBubbleManager.kt:141-182 (getSharedPreferences read + Settings.Secure.getString ContentResolver query + SimpleStringSplitter scan).
+- Recommended investigation or improvement:
+  Measure wakeup frequency and Binder call overhead with Perfetto/Battery Historian. Consider pausing the watchdog loop cleanly on ACTION_SCREEN_OFF and resuming on ACTION_SCREEN_ON, listening to Accessibility/Settings changes or caching in-memory flags instead of re-reading SharedPreferences and Settings.Secure every 5–10 seconds, and checking only when a transition occurs or at much longer intervals once healthy.
+
+------------------------------------------------------------------------
+Finding 3: 15-Minute Persisted Recovery Job Never Stops Rescheduling Itself
+------------------------------------------------------------------------
+- Severity: MEDIUM (bordering on HIGH when combined with "Keep Awake" battery exemptions)
+- File path:
+  - app/src/main/java/com/princeniithompson/rapcha/service/BubbleRecoveryJobService.kt
+  - app/src/main/java/com/princeniithompson/rapcha/service/BubbleRecoveryPolicies.kt
+  - app/src/main/java/com/princeniithompson/rapcha/diagnostics/BubbleHealthLog.kt
+- Class / Function:
+  - RecoveryJobPolicy.shouldReschedule (BubbleRecoveryPolicies.kt lines 239–258)
+  - BubbleRecoveryJobService.onStartJob (BubbleRecoveryJobService.kt lines 62–102)
+  - BubbleRecoveryJobScheduler.schedule (BubbleRecoveryJobService.kt lines 18–37)
+- What the code does:
+  BubbleRecoveryJobService is a scheduled system job (JobScheduler) marked setPersisted(true), meaning Android automatically restores it after the phone restarts. It is scheduled with a 15-minute minimum delay and a 30-minute deadline (15-minute window).
+  Inside RecoveryJobPolicy, a constant named MAX_CONSECUTIVE_SUCCESSES = 3 exists—clearly designed so the recovery job would stop bothering the phone after 3 healthy runs in a row. However, RecoveryJobPolicy.shouldReschedule() explicitly marks the consecutiveSuccesses parameter as unused (@Suppress("UNUSED_PARAMETER")) and unconditionally returns: bubbleEnabled && hasOverlayPermission.
+  As a result, every 15–30 minutes—24 hours a day, even when FloatingBubbleService is already alive and completely healthy—Android wakes up Rapcha's BubbleRecoveryJobService, runs onRecoveryJobPing(), runs A11yWatchdog.check(), increments and writes consecutive_job_successes to SharedPreferences disk storage (BubbleHealthLog.kt:195-199), and schedules the exact same 15-minute job again forever.
+- Why it matters in plain English:
+  Even when the app is working perfectly and the user hasn't typed anything for hours, Android is asked to launch/wake Rapcha's job scheduler every 15–30 minutes around the clock and write a counter to flash storage. Repeated 15-minute periodic jobs also prevent the system from keeping an otherwise idle app completely quiet. NEEDS RUNTIME MEASUREMENT for exact mAh impact.
+- When it happens:
+  Every 15 to 30 minutes continuously whenever the bubble toggle is enabled and overlay permission is granted, including after device reboots.
+- Evidence from source:
+  - BubbleRecoveryPolicies.kt:239-258 (MAX_CONSECUTIVE_SUCCESSES = 3 declared at line 245, but unused at lines 251-257 where shouldReschedule returns bubbleEnabled && hasOverlayPermission).
+  - BubbleRecoveryJobService.kt:24-31 (.setMinimumLatency(latency).setOverrideDeadline(deadline).setPersisted(true)).
+  - BubbleRecoveryJobService.kt:77-98 (calls onRecoveryJobPing(), writes consecutive_job_successes via recordJobOutcome, then reschedules itself via BubbleRecoveryJobScheduler.schedule).
+  - FloatingBubbleService.kt:173, 230 (calls scheduleIfMissing on every service start/creation).
+- Recommended investigation or improvement:
+  Honor MAX_CONSECUTIVE_SUCCESSES (stop rescheduling once the service is confirmed healthy and bound by accessibility, and only schedule recovery when an unexpected stop, FGS refusal, or task removal actually occurs), and avoid writing SharedPreferences counters on every healthy ping.
+
+------------------------------------------------------------------------
+Finding 4: Per-Frame Recomposition and Graphics Allocations in Default "Words" Bubble & Home Preview
+------------------------------------------------------------------------
+- Severity: HIGH / MEDIUM (depending on whether the user picks "Original Words" vs "Mini" bubble, and how long Home is open)
+- File path:
+  - app/src/main/java/com/princeniithompson/rapcha/ui/components/overlay/sections/FloatingDictationPopupState.kt
+  - app/src/main/java/com/princeniithompson/rapcha/ui/components/FloatingDictationBubbleOverlay.kt
+  - app/src/main/java/com/princeniithompson/rapcha/ui/components/GlowAnimationStyle.kt
+  - app/src/main/java/com/princeniithompson/rapcha/ui/components/overlay/FloatingGlowEffects.kt
+  - app/src/main/java/com/princeniithompson/rapcha/ui/screens/HomeScreen.kt
+- Class / Function:
+  - rememberFloatingDictationPopupState (FloatingDictationPopupState.kt lines 62–254)
+  - FloatingDictationPopup (FloatingDictationBubbleOverlay.kt lines 46–195)
+  - renderGlowAnimation (GlowAnimationStyle.kt lines 54–181)
+  - TopCarouselSection / BubbleChoicePage (HomeScreen.kt lines 319–366, 542–570)
+- What the code does:
+  Rapcha ships two bubble styles: the default "Original bubble" (Words) and the "Mini bubble" (Compact).
+  While the "Mini" bubble (CompactRecordingBar.kt) carefully defers animation reads inside Canvas draw lambdas so zero Compose widgets rebuild per frame, the default "Words" bubble does the opposite:
+  1. rememberFloatingDictationPopupState() reads 6+ infinite animation values (or 2 on low-power devices) plus animatedAmplitude directly during composition (using Kotlin `by` delegation, lines 84–189), and puts all those rapidly changing numbers into `remember(glowPulse, phase1, phase2, animatedAmplitude, ...)` (lines 229–233), creating a brand-new FloatingDictationPopupState object on every screen refresh frame (60–120 times per second!).
+  2. Because those values change every frame inside FloatingDictationPopup, Jetpack Compose recomposes (re-runs) FloatingDictationPopup, FloatingAuroraGlowSection, FloatingTranscriptSection, FloatingButtonRowSection, and FloatingNotchedCutoutSection on every single frame while dictating.
+  3. On each draw frame, drawNotchedOverlayBackground() creates new Brush gradient objects (radialGradient, horizontalGradient, verticalGradient) and Stroke objects (FloatingGlowEffects.kt lines 38–105). During transition/waiting phases on non-low-power devices, renderGlowAnimation() also allocates `Paint()` and `Rect` and uses an expensive offscreen `saveLayer` + `BlendMode.DstIn` compositing pass (GlowAnimationStyle.kt lines 87–106).
+  4. On the app's Home screen (HomeScreen.kt lines 319–366, 542–556), an auto-scrolling carousel cycles every 19 seconds. Whenever Page 0 (Original bubble preview) is active, it passes `mimicTalkingWhenSilent = true` and `bubbleVisible = true`, running that same continuous 60–120fps recomposition preview while the user just looks at the Home screen. (Good news: Page 2 and Page 3 are static stats cards, and `animating = pagerState.currentPage == page` stops the bubble animations while those pages are visible.)
+- Why it matters in plain English:
+  Rebuilding UI components and creating temporary objects 60 to 120 times every second keeps the main UI CPU thread and graphics chip (GPU) working continuously during dictation, causing extra battery drain and heat—especially on 90 Hz / 120 Hz screens and budget processors. Because "Original" (Words) is the default style (FloatingBubbleManager.kt line 74), most users hit this path. NEEDS RUNTIME MEASUREMENT (Frame timing / GPU energy comparison vs. Mini pill).
+- When it happens:
+  1. Throughout every active dictation session when using the default "Original" (Words) bubble.
+  2. While sitting on the Home screen whenever the carousel is showing Page 0 (Words preview) or Page 1 (Mini preview).
+- Evidence from source:
+  - FloatingBubbleManager.kt:74 (default chrome is BubbleChromeStyle.ORIGINAL).
+  - FloatingDictationPopupState.kt:84-190, 229-253 (per-frame `by` state reads + new FloatingDictationPopupState constructed every frame).
+  - FloatingDictationBubbleOverlay.kt:75-182 (state properties consumed across multiple composable sections).
+  - FloatingGlowEffects.kt:38-105 (per-frame Brush allocations).
+  - GlowAnimationStyle.kt:84-106 (saveLayer + BlendMode.DstIn when not lowPower and bounds not full width).
+  - HomeScreen.kt:319-332, 349-366, 542-569 (19s carousel with `mimicTalkingWhenSilent = true`).
+- Recommended investigation or improvement:
+  Pass animation values as lambda getters (`() -> Float`) into the Canvas draw phase of the Words bubble (matching the pattern already used in CompactRecordingBar.kt and OnboardingHeroWelcomeScreen.kt) and cache Brushes/Paints where dimensions don't change. On HomeScreen, verify if the preview needs to animate continuously after a few seconds or if it should pause when MainActivity is not focused.
+
+------------------------------------------------------------------------
+Finding 5: Accessibility Service Window/Focus Event Overhead & Extra 250ms Rechecks
+------------------------------------------------------------------------
+- Severity: MEDIUM
+- File path:
+  - app/src/main/res/xml/accessibility_service_config.xml
+  - app/src/main/java/com/princeniithompson/rapcha/service/RapchaAccessibilityService.kt
+- Class / Function:
+  - accessibility_service_config.xml (lines 1–10)
+  - RapchaAccessibilityService.setupServiceConnection (lines 234–254), onAccessibilityEvent (lines 307–356), runCoalescedEvaluation (lines 369–648)
+- What the code does:
+  RapchaAccessibilityService listens to system-wide window and focus changes so it knows when a keyboard appears above a text field. Good optimizations are already in place (see Positive Findings), including ignoring `TYPE_WINDOW_CONTENT_CHANGED`, coalescing bursts at 85ms, and running off the main thread. However, two unnecessary drains remain:
+  1. Unnecessary 250ms "second check" when the keyboard is already closed (lines 636–642):
+     `val shouldScheduleOneShotWatch = hasWindowEvent && (!isImeWindowPresent || previousVisible != settledVisible)`
+     Because `!isImeWindowPresent` is `true` almost all the time during normal phone use (scrolling apps, switching apps, opening menus, receiving toast/dialog popups when no keyboard is open), `shouldScheduleOneShotWatch` triggers a second background wake-up 250ms later (`scheduleKeyboardWatch()`) that calls `getWindows()` over IPC (`isImeVisibleNow()`), even though the keyboard wasn't open before and isn't open now.
+  2. `FLAG_INCLUDE_NOT_IMPORTANT_VIEWS` is enabled in both XML (line 6) and code (line 243). This tells Android's system Accessibility manager to package and deliver decorative/non-important layout views in window trees, increasing IPC data transfer and tree-traversal work whenever fallback node searches run (`findFocusedEditableInTree` / `findBestEditableInTree`, lines 1397–1427).
+- Why it matters in plain English:
+  Every time you switch apps or a small popup appears while using your phone normally (without typing), Rapcha performs a window check right away AND then wakes up a quarter-second later to ask Android for the full list of screen windows a second time. Across hundreds of app switches and popups a day, that creates extra cross-process system work. NEEDS RUNTIME MEASUREMENT.
+- When it happens:
+  Continuously during everyday phone navigation whenever Accessibility Service is enabled and the screen is unlocked.
+- Evidence from source:
+  - RapchaAccessibilityService.kt:636-642 (`!isImeWindowPresent` triggers `scheduleKeyboardWatch()` 250ms later via `KEYBOARD_WATCH_MS = 250L` on nearly every `TYPE_WINDOW_STATE_CHANGED` or `TYPE_WINDOWS_CHANGED` event when no keyboard is visible).
+  - accessibility_service_config.xml:6 and RapchaAccessibilityService.kt:243 (`FLAG_INCLUDE_NOT_IMPORTANT_VIEWS` enabled).
+- Recommended investigation or improvement:
+  Verify whether `scheduleKeyboardWatch()` is only needed when the keyboard *was* recently visible or transitioning (e.g., `wasImePresent || isImeWindowPresent || previousVisible != settledVisible`), rather than every time `!isImeWindowPresent` during unrelated window transitions. Also test on target apps (Samsung Notes, Google Keep, Chrome) whether `FLAG_INCLUDE_NOT_IMPORTANT_VIEWS` is strictly required for injection or can be dropped.
+
+------------------------------------------------------------------------
+Finding 6: "Keep Awake" OEM Battery Optimization Exemptions Magnify Background Cost
+------------------------------------------------------------------------
+- Severity: MEDIUM (Intentional product choice, but important power-management multiplier)
+- File path:
+  - app/src/main/AndroidManifest.xml (line 15)
+  - app/src/main/java/com/princeniithompson/rapcha/ui/protection/DeviceProtectionManager.kt (lines 75–188, 226–261)
+- Class / Function:
+  - AndroidManifest.xml: `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`
+  - DeviceProtectionManager.collectStatus / resolveOemGuide / isIgnoringBatteryOptimizations
+- What the code does:
+  Rapcha explicitly checks whether the user has placed it on Android's "Unrestricted" / Doze-exempt list (`ignoringBatteryOptimizations`), flags a red warning in "Keep Rapcha Awake" if not, and guides users on Samsung, Xiaomi, Oppo/Realme/OnePlus, Vivo, Tecno/Infinix/itel, and Huawei phones to disable OEM background limits and App Standby.
+- Why it matters in plain English:
+  While OEM exemptions help keep the floating bubble from being killed by aggressive phone makers, telling Android "never put this app to sleep" removes the system's safety net (Doze and App Standby buckets). Once exempted, any periodic job (like the 15-minute `BubbleRecoveryJobService` in Finding 3) or frequent background wake-up (like the 5-second watchdog in Finding 2) is allowed to run freely without Android batching or delaying it.
+- When it happens:
+  Always, once the user follows the "Keep Rapcha Awake" setup guide.
+- Evidence from source:
+  - AndroidManifest.xml:15 (`android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`).
+  - DeviceProtectionManager.kt:47-53 (`!ignoringBatteryOptimizations` triggers `hasAnyRed`), 117-188 (OEM-specific whitelist instructions).
+- Recommended investigation or improvement:
+  Keep the user's bubble reliable via the Accessibility Service binding (`RapchaAccessibilityService.bindBubbleService`) while trimming unneeded background loops (Findings 2 and 3) so battery exemption does not translate into unnecessary background drain.
+
+------------------------------------------------------------------------
+Finding 7: WebSocket Reconnect Storms in Dead Network Zones & 45-Second Keep-Alive Pings
+------------------------------------------------------------------------
+- Severity: MEDIUM
+- File path:
+  - app/src/main/java/com/princeniithompson/rapcha/websocket/GeminiLiveWebSocketClient.kt
+  - app/src/main/java/com/princeniithompson/rapcha/service/floating/FloatingDictationSessionManager.kt
+  - app/src/main/java/com/princeniithompson/rapcha/core/ApiConfig.kt
+- Class / Function:
+  - GeminiLiveWebSocketClient (`PING_INTERVAL_SECONDS = 45L` line 131, `client` builder lines 192–195, `handleDisconnectOrFailure` lines 481–590)
+  - FloatingDictationSessionManager.startSession / OrderedAudioSender (`MAX_AUDIO_QUEUE_CHUNKS = 150`, lines 51, 406–464)
+- What the code does:
+  While a dictation session is active, GeminiLiveWebSocketClient configures OkHttp with a 45-second `pingInterval`. If the connection drops, `handleDisconnectOrFailure` checks `isSessionActive()`. When a session is closed (`!isSessionActive()`), it suppresses reconnects immediately (lines 529–538 — good!). However, as long as `isRecording` remains true during an active session (or if Finding 1 occurs when the mic failed), it runs up to `MAX_RECONNECT_ATTEMPTS = 10` retries with exponential backoff from 1 second up to 30.5 seconds per try (~2+ minutes of repeated TLS/WebSocket reconnect handshakes), while `OrderedAudioSender` holds up to 150 audio chunks (~480 KB) in memory.
+  Additionally, `ApiConfig.sharedClient` (ApiConfig.kt lines 81–89) uses OkHttp's default `ConnectionPool`, which holds up to 5 idle HTTP/socket connections in memory for 5 minutes after activity stops (minor standard OkHttp overhead).
+- Why it matters in plain English:
+  Repeatedly waking up the cellular or Wi-Fi radio in poor signal areas to attempt up to 10 TLS reconnects consumes noticeable radio power, because mobile cellular radios stay in high-power mode for several seconds after each connection attempt.
+- When it happens:
+  Only during active dictation when mobile data or Wi-Fi is unstable or disconnected, or if a session stays open in an error state (Finding 1).
+- Evidence from source:
+  - GeminiLiveWebSocketClient.kt:130-131 (`MAX_RECONNECT_ATTEMPTS = 10`, `PING_INTERVAL_SECONDS = 45L`), 192-195, 540-574.
+  - ApiConfig.kt:81-89 (`sharedClient` lazy OkHttpClient).
+- Recommended investigation or improvement:
+  Verify connectivity availability (`ConnectivityManager`) before firing reconnect attempts in dead zones so the radio isn't woken repeatedly when the phone has zero internet connection.
+
+------------------------------------------------------------------------
+Finding 8: Hidden Onboarding WebView Stays in Memory Until Both Setup AND Key Verification Succeed
+------------------------------------------------------------------------
+- Severity: LOW-MEDIUM
+- File path:
+  - app/src/main/java/com/princeniithompson/rapcha/ui/screens/onboarding/provisioning/AiStudioAutomationEngine.kt
+  - app/src/main/java/com/princeniithompson/rapcha/ui/VoiceTypingScreen.kt
+  - app/src/main/java/com/princeniithompson/rapcha/ui/screens/onboarding/OnboardingScreen.kt
+- Class / Function:
+  - AiStudioAutomationEngine.createOrReuseWebView (lines 142–288), onHostPaused / onHostResumed (lines 311–356), tearDownWebView (lines 1093–1114)
+  - VoiceTypingScreen (lines 143–170, 218–224, 263–281)
+- What the code does:
+  To help new users get a free personal Gemini API key during onboarding, Rapcha embeds a full Android WebView (Chromium browser engine) with JavaScript, DOM storage, cookies, automated click/JS polling (up to 12 cycles), and a `ClipboardManager` listener.
+  Once `isOnboardingCompleted && apiKeyConfigured && isApiKeyVerified && apiKeyErrorReason.isBlank()`, both `VoiceTypingScreen` (lines 218–220) and `AiStudioAutomationEngine` (lines 858–860) call `tearDownWebView()`, which destroys the browser completely. While `MainActivity` is paused/backgrounded, `onHostPaused()` lowers WebView renderer priority to `RENDERER_PRIORITY_WAIVED` and calls `wv.onPause()` (lines 311–322).
+  However, if a user abandons onboarding mid-way, or if key verification hasn't succeeded yet (e.g., offline startup leaving `isApiKeyVerified == false`), `parkWebViewInStandby()` keeps the Chromium WebView instance and its renderer process + clipboard listener alive for as long as `MainActivity` remains open in memory. Also, when `MainActivity` opens with an unverified key, `verifyCurrentApiKeyIfNeeded()` makes a network check to `generativelanguage.googleapis.com` (VoiceTypingScreen.kt lines 221–223; VoiceTypingViewModel.kt lines 115–124).
+- Why it matters in plain English:
+  A Chromium WebView uses significant memory and background helper threads while alive. Destroying it after onboarding finishes is great, but leaving it parked in standby when onboarding is half-finished or offline uses extra RAM/CPU while the main app screen is open.
+- When it happens:
+  Only during first-time setup or key recovery—NOT during normal day-to-day floating bubble use after setup is complete.
+- Evidence from source:
+  - AiStudioAutomationEngine.kt:153-179, 286, 311-322, 858-879, 1093-1114.
+  - VoiceTypingScreen.kt:150-170, 218-224.
+- Recommended investigation or improvement:
+  Verify that `parkWebViewInStandby()` also unregisters the clipboard listener if user setup isn't actively waiting for a paste, or tear down the WebView after a timeout when the user leaves the setup step.
+
+------------------------------------------------------------------------
+Finding 9: Continuous Idle Animations on Welcome Screen & Small SharedPreferences Writes
+------------------------------------------------------------------------
+- Severity: LOW
+- File path:
+  - app/src/main/java/com/princeniithompson/rapcha/ui/screens/onboarding/OnboardingHeroWelcomeScreen.kt (lines 77–118)
+  - app/src/main/java/com/princeniithompson/rapcha/ui/screens/onboarding/OnboardingSandboxScreen.kt (lines 113–147)
+  - app/src/main/java/com/princeniithompson/rapcha/diagnostics/BubbleHealthLog.kt (lines 143–203)
+- Class / Function:
+  - OnboardingHeroWelcomeScreen (lines 77–118)
+  - OnboardingSandboxScreen (lines 119–147)
+  - BubbleHealthLog (`recordJobOutcome`, `recordLastRestartReason`, `markServiceRunning`, etc.)
+- What the code does:
+  1. Page 1 of onboarding (`OnboardingHeroWelcomeScreen`) runs 4 infinite animations continuously (60–120fps) while the user stays on that screen—though implemented cleanly in Compose Canvas draw phase with zero per-frame widget recomposition (good!).
+  2. `OnboardingSandboxScreen` starts an infinite bubble shake animation at step 2 and uses Android's built-in `SpeechRecognizer` (properly stopped in `DisposableEffect.onDispose`).
+  3. `BubbleHealthLog` writes status flags to `SharedPreferences` via `.apply()` (non-blocking async disk queue) on service start, stop, restart, and every 15-minute `BubbleRecoveryJobService` ping (`recordJobOutcome`, lines 195–199).
+- Why it matters in plain English:
+  While not major drains by themselves, keeping continuous animations running while a user leaves a welcome screen sitting open burns unnecessary display/GPU frame work, and writing flash storage counters every 15 minutes adds tiny avoidable I/O.
+- When it happens:
+  Welcome screen only during first launch; SharedPreferences writes on service lifecycle events and every 15-minute job ping.
+- Evidence from source:
+  - OnboardingHeroWelcomeScreen.kt:77-118.
+  - OnboardingSandboxScreen.kt:121-147.
+  - BubbleHealthLog.kt:195-199.
+- Recommended investigation or improvement:
+  Pause or slow onboarding welcome animations after inactivity or when backgrounded, and skip writing `consecutive_job_successes` when the service is already confirmed healthy.
+
+
+========================================================================
+4. IDLE BATTERY CONSUMPTION (SCENARIO 1, 4 & 6)
+========================================================================
+
+What happens when Rapcha is running in the background with the bubble enabled, while the user is NOT recording?
+
+1. Visual / UI Idle Cost (Very Low when collapsed / hidden):
+   - When the keyboard is hidden (normal phone browsing, locked screen, home screen), `overlayView` is `View.GONE` and `FloatingOverlayLifecycleOwner.setRendering(false)` drops Compose's lifecycle to `CREATED`, stopping Compose's frame clock completely (`FloatingOverlayWindowManager.kt:549-571`; `FloatingOverlayLifecycleOwner.kt:66-78`).
+   - Even when the keyboard IS open and the bubble is visible waiting to be tapped, it renders `IdleBubbleNativeView`—a plain native Android `View` drawing a pre-cached bitmap with zero animations and zero Jetpack Compose runtime attached (`IdleBubbleNativeView.kt:18-96, 187-240`).
+   - When the user is inside the Rapcha app itself on the Home screen (`HomeScreen.kt:319-366`), an auto-scrolling carousel plays continuous glowing bubble previews during Pages 0 and 1 (though paused on Pages 2 and 3).
+
+2. Background Watchdog & Scheduler Idle Cost (Primary Idle Drain Risk — NEEDS RUNTIME MEASUREMENT):
+   - While `FloatingBubbleService` is alive, `startWatchdogs()` wakes its coroutine every 5 seconds to read SharedPreferences and `Settings.canDrawOverlays()`, and every 10 seconds to run `A11yWatchdog.check()` (which queries `Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES`). When the screen is off, recovery actions are suppressed, **but the 5-second loop itself is never paused or canceled on screen-off**, meaning it runs every 5–10s whenever the phone's CPU is awake (`FloatingBubbleService.kt:372-441`).
+   - Independently, `BubbleRecoveryJobService` wakes up every 15–30 minutes indefinitely, even when everything is healthy, and writes to SharedPreferences (`BubbleRecoveryJobService.kt:62-102`; `BubbleRecoveryPolicies.kt:251-257`).
+
+3. Accessibility Service Idle Cost (Moderate during active phone use, Low when screen off):
+   - When screen is off or device is locked, `RapchaAccessibilityService` suppresses window inspection (`RapchaAccessibilityService.kt:186-197, 398-418`).
+   - When screen is on and unlocked, it listens only to 3 event types (`TYPE_VIEW_FOCUSED`, `TYPE_WINDOW_STATE_CHANGED`, `TYPE_WINDOWS_CHANGED`) throttled at 85ms on a background thread—**not** high-frequency scroll/content events.
+   - However, because `shouldScheduleOneShotWatch` triggers on `hasWindowEvent && !isImeWindowPresent`, nearly every app switch or popup while the keyboard is closed triggers a redundant second `getWindows()` IPC check 250ms later (`RapchaAccessibilityService.kt:636-642`).
+
+4. Idle Network / Mic / WakeLock Cost (Zero during normal idle):
+   - No microphone stream is open while idle.
+   - No `WakeLock` is held while idle.
+   - No persistent WebSocket is open while idle (`GeminiLiveWebSocketClient` closes on stop and suppresses reconnects when `!isSessionActive()`).
+
+
+========================================================================
+5. ACTIVE RECORDING CONSUMPTION (SCENARIO 2 & 5)
+========================================================================
+
+What happens while the user taps the bubble and speaks?
+
+1. Hardware & CPU Capture (Expected core cost):
+   - `AudioRecorder` opens Android's microphone at 16 kHz, 16-bit mono PCM on a dedicated `THREAD_PRIORITY_URGENT_AUDIO` thread (`AudioRecorder.kt:33-38, 107-117`), reading 640-byte slices using a blocking `AudioRecord.read()` call (no CPU spin-loop; includes a 10ms `Thread.sleep` fallback after 5 consecutive zero-byte reads at lines 164–170).
+   - It computes audio loudness (`meterValue`) per 100ms chunk (3200 bytes) using simple integer math + square root (`AudioRecorder.kt:319-332`).
+   - Platform audio pre-processing (`NoiseSuppressor`, `AcousticEchoCanceler`, `AutomaticGainControl`) is explicitly turned off (`enabled = false`, lines 242–256), which actually avoids extra DSP processing per audio frame.
+
+2. Power & Network Streaming:
+   - Acquires a `PARTIAL_WAKE_LOCK` capped at 30 minutes (`FloatingDictationSessionManager.kt:144-147`) to keep capture alive even if screen dims during a long dictation, backed by a 10-minute session limit (`DictationSessionClock`).
+   - Streams raw 100ms base64/JSON audio packets over a single `GeminiLiveWebSocketClient` connection using a shared process-wide `OkHttpClient` (`ApiConfig.kt:81-89`), avoiding repeated DNS/TLS handshakes, with a 45s WebSocket ping interval (`GeminiLiveWebSocketClient.kt:131, 194`).
+   - Active cellular/Wi-Fi streaming + continuous mic hardware + active CPU wake lock are naturally the heaviest power consumers during dictation, which is normal for live cloud speech-to-text.
+
+3. Overlay Rendering Cost During Recording (Depends heavily on Bubble Style & Phone Tier):
+   - Default "Original" (Words) bubble (`FloatingDictationPopupState.kt` + `FloatingDictationBubbleOverlay.kt`): Recomposes its Compose UI tree every frame (60–120fps) and allocates gradient Brushes per frame; on non-low-power devices, uses `saveLayer` + `BlendMode.DstIn` during entrance/exit/wait transitions (`GlowAnimationStyle.kt:88-106`). This is the #1 UI optimization opportunity on budget/high-refresh devices.
+   - "Mini" (Compact) bubble (`CompactRecordingBar.kt`): Zero per-frame widget recomposition (animation values read only inside draw/layer lambdas). Furthermore, `DevicePerformanceTier` (`DevicePerformanceTier.kt:11-45`) classifies phones with `isLowRamDevice`, <= 4.3 GB RAM, or <= Android 11 (API 30) as `lowPower = true`, which automatically disables Android 12+ `RenderEffect` GPU blur, disables 64x64 frost-grain bitmap tiling, disables `saveLayer`, and cuts animation count (`CompactRecordingBar.kt:129-142, 277-344, 371-389`).
+
+
+========================================================================
+6. POST-RECORDING CLEANUP (SCENARIO 3)
+========================================================================
+
+Does everything shut down cleanly after Cancel, Complete, Error, or Task Removal?
+
+A. Normal Cancel (`stopSession`) & Normal Complete (`finishActivityAndAwaitTranscript`):
+- Microphone (`AudioRecord`): Stopped and released cleanly inside `AudioRecorder.releaseRecorderSafely()` (`AudioRecorder.kt:301-316`) and awaited via `stopAndJoin()` (`FloatingDictationSessionManager.kt:262, 283`). Audio effects are released (`releaseEffects()`).
+- `PARTIAL_WAKE_LOCK`: Released in `finally` blocks in both `stopSession()` (`FloatingDictationSessionManager.kt:267-271`) and `finishActivityAndAwaitTranscript()` (`lines 328-332`), and in `release()` (`lines 393-394`).
+- `GeminiLiveWebSocketClient`: Disconnected via `ws.disconnect()` (`lines 263, 320`); reconnect loops check `isSessionActive()` and stop immediately (`GeminiLiveWebSocketClient.kt:529-538`).
+- Timers (`durationJob`, `sessionJob`): Canceled and cleared (`FloatingDictationSessionManager.kt:249-257, 281-282, 325-326`).
+- Microphone Foreground Service Status: Downgraded back to `SPECIAL_USE` after a 450ms delay (`FloatingBubbleService.kt:670-691`) so Android no longer marks the mic as active.
+- Compose Overlay: `collapsePanel()` calls `disposeExpandedComposeView()` (`compose.disposeComposition()` + `removeView(compose)`), swaps back to the lightweight `IdleBubbleNativeView`, and sets `lifecycleOwner.setRendering(false)` (`FloatingOverlayWindowManager.kt:447-458, 659-666`).
+- Disk / History Cleanup: `AppLogRepository` is a complete no-op (`AppLogRepository.kt:10-34`), `RecentDictations` is memory-only, and `DictationStats` performs a single `.apply()` write per completed dictation.
+
+B. CRITICAL CLEANUP GAP — Microphone Init/Read Failure (See Finding 1):
+- If `AudioRecorder` fails to initialize or hits a fatal read error inside `runCapture()` (`AudioRecorder.kt:121-135, 151-163`), `AudioRecorder` notifies `FloatingDictationSessionManager`'s private `onError` (`FloatingDictationSessionManager.kt:102-105`), which only shows an alert notification.
+- `isRecording` stays `true`, `WakeLock` stays held (up to 30 min timeout), `durationJob` keeps ticking every 1s, `GeminiLiveWebSocketClient` stays connected/pinging, the Compose overlay keeps animating, and Microphone FGS stays active until the user presses Cancel/Complete or the 10-minute session limit hits.
+
+C. Service Destruction (`onDestroy` / `onTaskRemoved`):
+- `onDestroy()` cancels watchdogs, unregisters `screenReceiver`, calls `stopVoiceTyping()` + `sessionManager.release()`, destroys the overlay, and cancels `serviceScope` (`FloatingBubbleService.kt:850-899`).
+- Note on `onTaskRemoved()` (`FloatingBubbleService.kt:901-938`): If the bubble is enabled and the user swipes Rapcha out of Recent Apps, Rapcha intentionally stays alive (does NOT stop recording or the bubble) unless the bubble toggle is disabled.
+
+
+========================================================================
+7. BACKGROUND ACTIVITY
+========================================================================
+
+Every background component in `AndroidManifest.xml` and source code:
+
+1. `FloatingBubbleService` (`AndroidManifest.xml:70-79`, `FloatingBubbleService.kt`):
+   - Runs as a persistent `specialUse` foreground service (upgraded to `microphone|specialUse` only during recording), bound by `RapchaAccessibilityService` (`BIND_AUTO_CREATE`) and marked `START_STICKY` + `stopWithTask="false"`.
+   - Hosts the 5-second visibility watchdog and 10-second accessibility watchdog (Finding 2).
+
+2. `BubbleRecoveryJobService` (`AndroidManifest.xml:81-84`, `BubbleRecoveryJobService.kt`):
+   - Persisted `JobScheduler` task firing every 15–30 minutes forever while bubble is enabled (Finding 3).
+
+3. `RapchaAccessibilityService` (`AndroidManifest.xml:87-100`, `RapchaAccessibilityService.kt`):
+   - System-bound service receiving `TYPE_VIEW_FOCUSED`, `TYPE_WINDOW_STATE_CHANGED`, and `TYPE_WINDOWS_CHANGED` on a single `HandlerThread` (`rapcha-a11y-eval`) with 85ms coalescing. Triggers unnecessary 250ms rechecks when keyboard is closed (Finding 5).
+
+4. `RapchaInputMethodService` (`AndroidManifest.xml:103-115`, `RapchaInputMethodService.kt`):
+   - Companion keyboard service, only active if the user switches keyboards to it; passive otherwise.
+
+5. `BubbleBootReceiver` (`AndroidManifest.xml:117-124`, `BubbleBootReceiver.kt`):
+   - Wakes up only on phone reboot (`BOOT_COMPLETED`, `LOCKED_BOOT_COMPLETED`) or app update (`MY_PACKAGE_REPLACED`) to restore the bubble if enabled. Minimal impact.
+
+6. `AiStudioAutomationEngine` WebView (`AiStudioAutomationEngine.kt`):
+   - Active only during onboarding / API key recovery; torn down completely afterward (`VoiceTypingScreen.kt:218-220`; `AiStudioAutomationEngine.kt:858-860, 1093-1114`).
+
+7. No Hidden Background Trackers Found:
+   - Confirmed via codebase search: No `WorkManager`, no `AlarmManager` periodic alarms, no GPS/location listeners, no step/motion sensors, no Bluetooth scanning, and no background analytics uploads (`AppLogRepository` is a no-op).
+
+
+========================================================================
+8. POSITIVE FINDINGS (BATTERY-CONSCIOUS PATTERNS ALREADY IMPLEMENTED)
+========================================================================
+
+1. Native Collapsed Idle View (`IdleBubbleNativeView.kt:18-269`; `FloatingOverlayWindowManager.kt:79-80, 219-262, 447-458`):
+   - Collapsed bubble draws a pre-rasterized bitmap inside a standard Android `View`. The heavy `ComposeView` is created *only* when dictation starts and destroyed (`disposeComposition()` + `removeView()`) as soon as dictation ends.
+2. Frame-Clock Suspension When Hidden (`FloatingOverlayLifecycleOwner.kt:66-78`; `FloatingOverlayWindowManager.kt:549-571`):
+   - Calling `lifecycleOwner.setRendering(false)` drops the Compose lifecycle to `CREATED`, stopping Compose's frame clock completely whenever the bubble is hidden or collapsed.
+3. Automatic Low-Power Hardware Scaling (`DevicePerformanceTier.kt:11-46`; `CompactRecordingBar.kt:129-142, 277-344, 371`):
+   - Phones with Android's `isLowRamDevice`, <= 4.3 GB RAM, or Android 11 and older automatically skip expensive `RenderEffect` blurs, skip 64x64 noise bitmap tiling, skip `saveLayer` offscreen passes, and reduce animation specs.
+4. Screen-Off & Lockscreen Guards (`RapchaAccessibilityService.kt:186-197, 398-418, 743`; `FloatingBubbleService.kt:109-116, 383`):
+   - Accessibility window parsing and UI watchdog recovery stop immediately when the screen turns off or locks (unless protecting an active dictation).
+5. "v25 / v26 Lean" Feature Pruning (`AppLogRepository.kt:1-35`; `LegacyDataCleanup.kt:1-69`; `MainActivity.kt:38`):
+   - Removed continuous JSONL disk log files, WAV audio file saving, Stage-2 AI polish network calls, and vibrator/haptic motor triggers (`isHapticFeedbackEnabled = false`), and runs a one-time background cleanup (`LegacyDataCleanup`) to remove old files.
+6. Narrowed Accessibility Scope + Node Recycling (`accessibility_service_config.xml:4-9`; `RapchaAccessibilityService.kt:349-367, 656-675`):
+   - Ignores `TYPE_WINDOW_CONTENT_CHANGED` (which would otherwise fire constantly on video players, clocks, and scrolling feeds), throttles events at 85ms on a background thread, caches the device keyboard list for 60 seconds, and recycles `AccessibilityNodeInfo` objects.
+7. Shared Process-Wide `OkHttpClient` (`ApiConfig.kt:81-89`; `GeminiLiveWebSocketClient.kt:192-195`):
+   - Reuses a single `OkHttpClient` dispatcher and TLS session cache across dictations instead of spinning up fresh thread pools per session.
+8. Strict Reconnect Suppression After Stop (`GeminiLiveWebSocketClient.kt:529-538`):
+   - If a socket closes when no dictation session is active, reconnects are canceled immediately.
+9. Compact Pill Deferred Animation Reads (`CompactRecordingBar.kt:121-171`) & Post-Onboarding WebView Destruction (`AiStudioAutomationEngine.kt:1093-1114`):
+   - Compact pill redraws without recomposing widgets, and the Chromium WebView is destroyed once onboarding + key verification succeed.
+
+
+========================================================================
+9. PRIORITY RANKING (TOP 5 AREAS TO ADDRESS)
+========================================================================
+
+1. [Priority 1 — CRITICAL FIX] Fix `AudioRecorder` error handling in `FloatingDictationSessionManager` (Finding 1) so a failed microphone open/read immediately stops the session and releases the 30-minute `PARTIAL_WAKE_LOCK`, WebSocket, 1-second timer, and Microphone foreground state.
+2. [Priority 2 — HIGH] Stop rescheduling `BubbleRecoveryJobService` forever once healthy (`RecoveryJobPolicy.shouldReschedule` honoring `MAX_CONSECUTIVE_SUCCESSES`, Finding 3), and avoid periodic SharedPreferences counter writes when healthy.
+3. [Priority 3 — HIGH] Optimize or reduce `FloatingBubbleService`'s continuous 5s/10s polling watchdog (Finding 2)—at minimum pause/cancel the loop cleanly when `ACTION_SCREEN_OFF` arrives and reduce repeated `Settings.Secure` / `SharedPreferences` reads while awake.
+4. [Priority 4 — MEDIUM-HIGH] Refactor `FloatingDictationPopupState` (the default "Words" bubble, Finding 4) to read animation values inside the draw phase (like `CompactRecordingBar`) so dictation and the Home preview don't recompose UI trees and allocate gradient Brushes 60–120 times per second.
+5. [Priority 5 — MEDIUM] Tighten `RapchaAccessibilityService.shouldScheduleOneShotWatch` (Finding 5) so unrelated window changes while the keyboard is closed don't schedule redundant 250ms `getWindows()` checks, and test whether `FLAG_INCLUDE_NOT_IMPORTANT_VIEWS` can be removed.
+
+
+========================================================================
+10. FINAL VERDICT (DIRECT ANSWERS)
+========================================================================
+
+1. Will Rapcha cause noticeable battery drain during normal idle use?
+   - Probably low-to-moderate during normal screen-on use, but there are clear unnecessary wakeups: Visually, idle cost is near zero thanks to `IdleBubbleNativeView` and `setRendering(false)`. However, the 5-second/10-second watchdog polling loop (which ticks whenever the CPU is awake, even if screen-off), the infinite 15-minute `BubbleRecoveryJobService` wakeups, and extra 250ms accessibility rechecks on app switches create unnecessary background work—especially because users are guided to exempt Rapcha from Android battery restrictions. NEEDS RUNTIME MEASUREMENT (24-hour Battery Historian / AccuBattery / Android Settings battery screen test) to confirm exact mAh/% drain.
+
+2. Will Rapcha cause noticeable battery drain during active recording?
+   - Yes, noticeable consumption during active recording is expected and inherent to real-time microphone capture + live WebSocket audio streaming + CPU `PARTIAL_WAKE_LOCK`. However, users using the default "Original" (Words) bubble currently pay extra avoidable CPU/GPU frame-recomposition battery cost compared to the lighter "Mini" pill. NEEDS RUNTIME MEASUREMENT on a physical phone.
+
+3. Is there anything that keeps draining battery after recording stops?
+   - Under normal Cancel/Complete: No—microphone, `WakeLock`, WebSocket, Microphone FGS, and Compose overlay are all torn down cleanly.
+   - On microphone initialization/read failure (Finding 1): YES—a bug leaves the `WakeLock`, 1-second timer, WebSocket, expanded UI, and Microphone foreground service active for up to 10 minutes unless the user manually cancels or completes.
+
+4. Is Rapcha safe for budget and older phones (e.g., 3–4 GB RAM, Android 11 / Samsung A15 / Infinix Hot 11)?
+   - Partially yes, with two caveats: The authors built real protections specifically for budget devices (`DevicePerformanceTier`, `IdleBubbleNativeView`, `OnboardingHeroWelcomeScreen` Canvas optimization, and `AppLogRepository` no-op). The two main remaining risks for budget phones are: (a) the default "Words" bubble still recomposes every frame during recording and Home preview, and (b) if onboarding is interrupted before key verification, the hidden Chromium WebView stays in memory while the app is open. NEEDS RUNTIME MEASUREMENT on those devices.
+
+5. What is the confidence level of these findings?
+   - Code Logic & Path Existence: HIGH (every finding, class, and line number was directly verified from the current source files).
+   - Real-World Percentage / mAh Drain Magnitude: LOW-TO-MEDIUM without telemetry—because actual milliamp drain depends on Android's Doze batching, OEM PowerKeeper/Device Care policies, cellular vs. Wi-Fi radio state, and SoC efficiency. All unmeasured runtime figures are marked NEEDS RUNTIME MEASUREMENT.
+
+6. Which areas require physical-device testing next?
+   - Measure 12–24h idle screen-off + screen-on battery % and wakeup counts via Android Studio Profiler / Perfetto / `dumpsys batterystats` (comparing current code against pausing the 5s watchdog on screen-off and capping `BubbleRecoveryJobService`).
+   - Profile GPU rendering / CPU frame time and battery temp during a 3-minute dictation on a budget phone (comparing "Words" bubble vs. "Mini" pill).
+   - Reproduce a busy-microphone failure (e.g., while another recorder or call holds the mic) and inspect `dumpsys power` to verify the stuck `voxstream:floating_dictation_wakelock` leak described in Finding 1.
+   - Check Binder/IPC frequency in `RapchaAccessibilityService` during rapid app switching with the keyboard closed (`shouldScheduleOneShotWatch`).

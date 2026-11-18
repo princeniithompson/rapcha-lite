@@ -54,6 +54,7 @@ class BubbleBootReceiver : BroadcastReceiver() {
             else -> {
                 val started = FloatingBubbleManager.startBubbleService(app, source = trigger)
                 if (!started) {
+                    BubbleHealthLog.resetJobSuccessStreak(app)
                     BubbleRecoveryJobScheduler.schedule(app, RecoveryJobPolicy.DEFAULT_DELAY_MS)
                     "refused_job_scheduled"
                 } else {

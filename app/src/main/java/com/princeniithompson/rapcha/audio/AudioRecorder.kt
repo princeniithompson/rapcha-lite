@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.sqrt
 
 sealed class AudioRecorderState {
@@ -81,6 +82,7 @@ class AudioRecorder(
     @Volatile private var thread: Thread? = null
     @Volatile private var finished: CompletableDeferred<Unit>? = null
     private val isRecording = AtomicBoolean(false)
+    private val captureGeneration = AtomicLong(0L)
 
     /** Elapsed-realtime deadline for a graceful stop; 0 means keep recording. */
     @Volatile private var drainDeadlineMs = 0L
@@ -99,18 +101,19 @@ class AudioRecorder(
             stop()
             isRecording.set(true)
         }
+        val generation = captureGeneration.incrementAndGet()
         _state.value = AudioRecorderState.Starting
         drainDeadlineMs = 0L
         hardStop = false
         val done = CompletableDeferred<Unit>()
         finished = done
-        val t = Thread({ runCapture(done) }, "rapcha-mic")
+        val t = Thread({ runCapture(done, generation) }, "rapcha-mic")
         t.isDaemon = true
         thread = t
         t.start()
     }
 
-    private fun runCapture(done: CompletableDeferred<Unit>) {
+    private fun runCapture(done: CompletableDeferred<Unit>, generation: Long) {
         try {
             Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
         } catch (_: Throwable) {
@@ -120,17 +123,22 @@ class AudioRecorder(
             val minBufferSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG, AUDIO_FORMAT)
             if (minBufferSize <= 0) {
                 val err = "AudioRecord initialization error: Invalid minBufferSize ($minBufferSize)"
-                _state.value = AudioRecorderState.Error(err)
-                onError(err)
+                if (captureGeneration.get() == generation && isRecording.get() && !hardStop) {
+                    _state.value = AudioRecorderState.Error(err)
+                    onError(err)
+                }
                 return
             }
-            recorder = openStartedRecorder(bufferSizeFor(minBufferSize))
+            recorder = openStartedRecorder(bufferSizeFor(minBufferSize), generation)
             if (recorder == null) {
-                if (isRecording.get()) {
+                if (captureGeneration.get() == generation && isRecording.get() && !hardStop) {
                     val err = "Microphone initialization failed"
                     _state.value = AudioRecorderState.Error(err)
                     onError(err)
                 }
+                return
+            }
+            if (captureGeneration.get() != generation || !isRecording.get() || hardStop) {
                 return
             }
             audioRecord = recorder
@@ -141,7 +149,7 @@ class AudioRecorder(
             var filled = 0
             var consecutiveZeroReads = 0
             while (true) {
-                if (hardStop) break
+                if (hardStop || captureGeneration.get() != generation) break
                 val deadline = drainDeadlineMs
                 if (deadline > 0L && SystemClock.elapsedRealtime() >= deadline) break
                 if (!isRecording.get() && deadline == 0L) break
@@ -149,7 +157,7 @@ class AudioRecorder(
                 val toRead = minOf(SLICE_SIZE_BYTES, CHUNK_SIZE_BYTES - filled)
                 val read = recorder.read(chunkBuffer, filled, toRead)
                 if (read < 0) {
-                    if (isRecording.get() && !hardStop) {
+                    if (captureGeneration.get() == generation && isRecording.get() && !hardStop) {
                         val name = when (read) {
                             AudioRecord.ERROR_INVALID_OPERATION -> "ERROR_INVALID_OPERATION (-3)"
                             AudioRecord.ERROR_BAD_VALUE -> "ERROR_BAD_VALUE (-2)"
@@ -157,7 +165,9 @@ class AudioRecorder(
                             AudioRecord.ERROR -> "ERROR (-1)"
                             else -> "Code $read"
                         }
-                        onError("AudioRecord read failure: $name")
+                        val err = "AudioRecord read failure: $name"
+                        _state.value = AudioRecorderState.Error(err)
+                        onError(err)
                     }
                     break
                 }
@@ -173,21 +183,25 @@ class AudioRecorder(
                 if (filled >= CHUNK_SIZE_BYTES) {
                     val packet = chunkBuffer.copyOf()
                     filled = 0
-                    onAmplitudeChanged(meterValue(packet))
-                    onChunkReady(packet)
+                    if (captureGeneration.get() == generation) {
+                        onAmplitudeChanged(meterValue(packet))
+                        onChunkReady(packet)
+                    }
                 }
             }
             // Graceful stop: the last partial packet still carries speech.
-            if (!hardStop) {
+            if (!hardStop && captureGeneration.get() == generation) {
                 tailPacket(chunkBuffer, filled)?.let { onChunkReady(it) }
             }
         } catch (t: Throwable) {
             Log.e(TAG, "Exception in capture thread: ${t.message}", t)
-            if (isRecording.get() && !hardStop) {
-                onError("Microphone error: ${t.message ?: t.javaClass.simpleName}")
+            if (captureGeneration.get() == generation && isRecording.get() && !hardStop) {
+                val err = "Microphone error: ${t.message ?: t.javaClass.simpleName}"
+                _state.value = AudioRecorderState.Error(err)
+                onError(err)
             }
         } finally {
-            releaseRecorderSafely(recorder)
+            releaseRecorderSafely(recorder, generation)
             done.complete(Unit)
         }
     }
@@ -198,15 +212,16 @@ class AudioRecorder(
      * much quieter, and the near-silence gate in TranscriptAcceptance was calibrated on MIC.
      */
     @SuppressLint("MissingPermission")
-    private fun openStartedRecorder(bufferSize: Int): AudioRecord? {
+    private fun openStartedRecorder(bufferSize: Int, generation: Long): AudioRecord? {
         val plan = ArrayList<Pair<Int, String>>()
         repeat(MIC_OPEN_ATTEMPTS) { plan.add(MediaRecorder.AudioSource.MIC to "MIC") }
         plan.add(MediaRecorder.AudioSource.VOICE_RECOGNITION to "VOICE_RECOGNITION")
         var lastProblem = "unknown"
         for ((index, attempt) in plan.withIndex()) {
-            if (!isRecording.get() || hardStop) return null
+            if (captureGeneration.get() != generation || !isRecording.get() || hardStop) return null
             if (index > 0) {
                 try { Thread.sleep(MIC_RETRY_DELAY_MS) } catch (_: InterruptedException) { return null }
+                if (captureGeneration.get() != generation || !isRecording.get() || hardStop) return null
             }
             var candidate: AudioRecord? = null
             try {
@@ -225,6 +240,10 @@ class AudioRecorder(
                 }
                 activeSourceName = attempt.second
                 return candidate
+            } catch (se: SecurityException) {
+                lastProblem = "${attempt.second}:SecurityException"
+                try { candidate?.release() } catch (_: Throwable) {}
+                break
             } catch (t: Throwable) {
                 lastProblem = "${attempt.second}:${t.javaClass.simpleName}"
                 try { candidate?.release() } catch (_: Throwable) {}
@@ -283,6 +302,7 @@ class AudioRecorder(
      */
     suspend fun stopAndJoin(tailMs: Long = 0L) {
         val done = finished
+        val genAtStop = captureGeneration.get()
         if (tailMs > 0L && isRecording.get() && !hardStop) {
             drainDeadlineMs = SystemClock.elapsedRealtime() + tailMs
             isRecording.set(false)
@@ -294,13 +314,18 @@ class AudioRecorder(
             done?.await()
         } catch (_: Throwable) {
         }
-        thread = null
-        _state.value = AudioRecorderState.Idle
+        if (captureGeneration.get() == genAtStop) {
+            thread = null
+            _state.value = AudioRecorderState.Idle
+        }
     }
 
-    private fun releaseRecorderSafely(recorder: AudioRecord?) {
-        isRecording.set(false)
-        releaseEffects()
+    private fun releaseRecorderSafely(recorder: AudioRecord?, generation: Long) {
+        val isCurrentGen = captureGeneration.get() == generation
+        if (isCurrentGen) {
+            isRecording.set(false)
+            releaseEffects()
+        }
         try {
             recorder?.apply {
                 if (recordingState == AudioRecord.RECORDSTATE_RECORDING) stop()
@@ -309,9 +334,11 @@ class AudioRecorder(
         } catch (e: Exception) {
             Log.w(TAG, "Error releasing AudioRecord: ${e.message}")
         } finally {
-            audioRecord = null
-            _state.value = AudioRecorderState.Idle
-            onAmplitudeChanged(0f)
+            if (isCurrentGen) {
+                audioRecord = null
+                _state.value = AudioRecorderState.Idle
+                onAmplitudeChanged(0f)
+            }
         }
     }
 

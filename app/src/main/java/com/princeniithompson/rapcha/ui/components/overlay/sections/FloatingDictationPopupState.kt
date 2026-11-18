@@ -29,15 +29,15 @@ import androidx.compose.runtime.setValue
  */
 @Stable
 class FloatingDictationPopupState(
-    val glowPulse: Float,
-    val phase1: Float,
-    val phase2: Float,
-    val animatedAmplitude: Float,
-    val idleBreathing: Float,
-    val cursorAlpha: Float,
-    val morphProgress: Float,
+    private val glowPulseProvider: () -> Float,
+    private val phase1Provider: () -> Float,
+    private val phase2Provider: () -> Float,
+    private val animatedAmplitudeProvider: () -> Float,
+    private val idleBreathingProvider: () -> Float,
+    val cursorAlphaProvider: () -> Float,
+    private val morphProgressProvider: () -> Float,
     val sunsetEntranceProgress: Float,
-    val waitingLoopProgress: Float,
+    private val waitingLoopProgressProvider: () -> Float,
     val isFinalizing: Boolean,
     val isPolishing: Boolean,
     val scrollState: ScrollState,
@@ -45,13 +45,27 @@ class FloatingDictationPopupState(
     val lowPower: Boolean = false,
     private val onLocalCompleteTriggered: () -> Unit
 ) {
+    val glowPulse: Float get() = glowPulseProvider()
+    val phase1: Float get() = phase1Provider()
+    val phase2: Float get() = phase2Provider()
+    val animatedAmplitude: Float get() = animatedAmplitudeProvider()
+    val idleBreathing: Float get() = idleBreathingProvider()
+    val cursorAlpha: Float get() = cursorAlphaProvider()
+    val morphProgress: Float get() = morphProgressProvider()
+    val waitingLoopProgress: Float get() = waitingLoopProgressProvider()
+
     val effectiveAmp: Float
         get() {
+            val animAmp = animatedAmplitude
             if (mimicTalkingWhenSilent) {
-                return animatedAmplitude.coerceIn(0.85f, 1.0f)
+                return if (animAmp > 0.05f) {
+                    animAmp.coerceIn(0.85f, 1.0f)
+                } else {
+                    (0.88f + 0.12f * kotlin.math.abs(kotlin.math.sin(phase1 * 3.2f))).coerceIn(0.85f, 1.0f)
+                }
             }
-            val voiceWeight = (animatedAmplitude / 0.18f).coerceIn(0f, 1f)
-            return ((1f - voiceWeight) * idleBreathing + animatedAmplitude).coerceIn(0.08f, 1f)
+            val voiceWeight = (animAmp / 0.18f).coerceIn(0f, 1f)
+            return ((1f - voiceWeight) * idleBreathing + animAmp).coerceIn(0.08f, 1f)
         }
 
     fun markLocalComplete() {
@@ -70,18 +84,18 @@ fun rememberFloatingDictationPopupState(
     bubbleVisible: Boolean = true,
     lowPower: Boolean = false
 ): FloatingDictationPopupState {
-    var glowPulse = 0.95f
-    var phase1 = 0f
-    var phase2 = 0f
-    var idleBreathing = 0.12f
-    var waitingLoopAnim = 0f
-    var cursorAlpha = 1f
+    var glowPulseProvider: () -> Float = { 0.95f }
+    var phase1Provider: () -> Float = { 0f }
+    var phase2Provider: () -> Float = { 0f }
+    var idleBreathingProvider: () -> Float = { 0.12f }
+    var waitingLoopAnimProvider: () -> Float = { 0f }
+    var cursorAlphaProvider: () -> Float = { 1f }
 
     if (bubbleVisible) {
         val infiniteTransition = rememberInfiniteTransition(label = "auroraGlow")
         if (lowPower) {
-            // Low-power mode: animate only 2 values with longer, gentler tweens
-            val p1 by infiniteTransition.animateFloat(
+            // Low-power mode: animate only 2 values with longer, gentler tweens, read only in draw/layer phase
+            val p1State = infiniteTransition.animateFloat(
                 initialValue = 0f,
                 targetValue = (2f * Math.PI).toFloat(),
                 animationSpec = infiniteRepeatable(
@@ -90,7 +104,7 @@ fun rememberFloatingDictationPopupState(
                 ),
                 label = "phase1"
             )
-            val cAlpha by infiniteTransition.animateFloat(
+            val cAlphaState = infiniteTransition.animateFloat(
                 initialValue = 1f,
                 targetValue = 0.15f,
                 animationSpec = infiniteRepeatable(
@@ -99,14 +113,14 @@ fun rememberFloatingDictationPopupState(
                 ),
                 label = "cursorBlink"
             )
-            phase1 = p1
-            phase2 = (2f * Math.PI).toFloat() - p1
-            glowPulse = 0.92f + 0.08f * kotlin.math.sin(p1.toDouble()).toFloat()
-            idleBreathing = 0.12f
-            waitingLoopAnim = (p1 / (2f * Math.PI.toFloat())).coerceIn(0f, 1f)
-            cursorAlpha = cAlpha
+            phase1Provider = { p1State.value }
+            phase2Provider = { (2f * Math.PI).toFloat() - p1State.value }
+            glowPulseProvider = { 0.92f + 0.08f * kotlin.math.sin(p1State.value.toDouble()).toFloat() }
+            idleBreathingProvider = { 0.12f }
+            waitingLoopAnimProvider = { (p1State.value / (2f * Math.PI.toFloat())).coerceIn(0f, 1f) }
+            cursorAlphaProvider = { cAlphaState.value }
         } else {
-            val animGlowPulse by infiniteTransition.animateFloat(
+            val animGlowPulseState = infiniteTransition.animateFloat(
                 initialValue = 0.85f,
                 targetValue = 1.05f,
                 animationSpec = infiniteRepeatable(
@@ -115,7 +129,7 @@ fun rememberFloatingDictationPopupState(
                 ),
                 label = "glowPulse"
             )
-            val animPhase1 by infiniteTransition.animateFloat(
+            val animPhase1State = infiniteTransition.animateFloat(
                 initialValue = 0f,
                 targetValue = (2f * Math.PI).toFloat(),
                 animationSpec = infiniteRepeatable(
@@ -124,7 +138,7 @@ fun rememberFloatingDictationPopupState(
                 ),
                 label = "phase1"
             )
-            val animPhase2 by infiniteTransition.animateFloat(
+            val animPhase2State = infiniteTransition.animateFloat(
                 initialValue = (2f * Math.PI).toFloat(),
                 targetValue = 0f,
                 animationSpec = infiniteRepeatable(
@@ -133,7 +147,7 @@ fun rememberFloatingDictationPopupState(
                 ),
                 label = "phase2"
             )
-            val animIdleBreathing by infiniteTransition.animateFloat(
+            val animIdleBreathingState = infiniteTransition.animateFloat(
                 initialValue = 0.08f,
                 targetValue = 0.18f,
                 animationSpec = infiniteRepeatable(
@@ -142,7 +156,7 @@ fun rememberFloatingDictationPopupState(
                 ),
                 label = "idleBreathing"
             )
-            val animWaitingLoop by infiniteTransition.animateFloat(
+            val animWaitingLoopState = infiniteTransition.animateFloat(
                 initialValue = 0f,
                 targetValue = 1f,
                 animationSpec = infiniteRepeatable(
@@ -151,7 +165,7 @@ fun rememberFloatingDictationPopupState(
                 ),
                 label = "waitingLoopAnim"
             )
-            val animCursorAlpha by infiniteTransition.animateFloat(
+            val animCursorAlphaState = infiniteTransition.animateFloat(
                 initialValue = 1f,
                 targetValue = 0f,
                 animationSpec = infiniteRepeatable(
@@ -160,26 +174,23 @@ fun rememberFloatingDictationPopupState(
                 ),
                 label = "cursorBlink"
             )
-            glowPulse = animGlowPulse
-            phase1 = animPhase1
-            phase2 = animPhase2
-            idleBreathing = animIdleBreathing
-            waitingLoopAnim = animWaitingLoop
-            cursorAlpha = animCursorAlpha
+            glowPulseProvider = { animGlowPulseState.value }
+            phase1Provider = { animPhase1State.value }
+            phase2Provider = { animPhase2State.value }
+            idleBreathingProvider = { animIdleBreathingState.value }
+            waitingLoopAnimProvider = { animWaitingLoopState.value }
+            cursorAlphaProvider = { animCursorAlphaState.value }
         }
     }
 
-    val simulatedTalking = 0.88f + 0.12f * kotlin.math.abs(kotlin.math.sin(phase1 * 3.2f))
-    // Asymmetric audio amplitude tracking
-    val rawTargetAmp = if (isRecording || mimicTalkingWhenSilent) {
-        if (audioAmplitude > 0.05f) audioAmplitude.coerceIn(0f, 1f)
-        else if (mimicTalkingWhenSilent) simulatedTalking.coerceIn(0.85f, 1.0f)
-        else 0f
+    // Asymmetric audio amplitude tracking; silent mimicTalkingWhenSilent modulation runs in draw phase.
+    val rawTargetAmp = if (isRecording && audioAmplitude > 0.05f) {
+        audioAmplitude.coerceIn(0f, 1f)
     } else 0f
     var prevTargetAmp by remember { mutableFloatStateOf(0f) }
     val isAttacking = rawTargetAmp > prevTargetAmp
 
-    val animatedAmplitude by animateFloatAsState(
+    val animatedAmplitudeState = animateFloatAsState(
         targetValue = rawTargetAmp,
         animationSpec = if (isAttacking) {
             spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = Spring.StiffnessHigh)
@@ -208,9 +219,6 @@ fun rememberFloatingDictationPopupState(
             exitAnim.snapTo(0f)
         }
     }
-    val morphProgress = exitAnim.value
-    val waitingLoopProgress = if (isFinishingActive && morphProgress >= 0.999f) waitingLoopAnim else 0f
-    val sunsetEntranceProgress = 1f
 
     LaunchedEffect(isRecording) {
         if (isRecording) {
@@ -227,20 +235,20 @@ fun rememberFloatingDictationPopupState(
     }
 
     return remember(
-        glowPulse, phase1, phase2, animatedAmplitude, idleBreathing,
-        cursorAlpha, morphProgress, sunsetEntranceProgress, waitingLoopProgress,
-        isFinalizing, isPolishing, scrollState, lowPower
+        isFinalizing, isPolishing, scrollState, mimicTalkingWhenSilent, lowPower, bubbleVisible
     ) {
         FloatingDictationPopupState(
-            glowPulse = glowPulse,
-            phase1 = phase1,
-            phase2 = phase2,
-            animatedAmplitude = animatedAmplitude,
-            idleBreathing = idleBreathing,
-            cursorAlpha = cursorAlpha,
-            morphProgress = morphProgress,
-            sunsetEntranceProgress = sunsetEntranceProgress,
-            waitingLoopProgress = waitingLoopProgress,
+            glowPulseProvider = glowPulseProvider,
+            phase1Provider = phase1Provider,
+            phase2Provider = phase2Provider,
+            animatedAmplitudeProvider = { animatedAmplitudeState.value },
+            idleBreathingProvider = idleBreathingProvider,
+            cursorAlphaProvider = cursorAlphaProvider,
+            morphProgressProvider = { exitAnim.value },
+            sunsetEntranceProgress = 1f,
+            waitingLoopProgressProvider = {
+                if (isFinishingActive && exitAnim.value >= 0.999f) waitingLoopAnimProvider() else 0f
+            },
             isFinalizing = isFinalizing,
             isPolishing = isPolishing,
             scrollState = scrollState,

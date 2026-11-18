@@ -220,6 +220,8 @@ fun VoiceTypingScreen(
             automationEngine.tearDownWebView()
         } else if (isOnboardingCompleted && apiKeyConfigured && !isApiKeyVerified && apiKeyErrorReason.isBlank()) {
             viewModel.verifyCurrentApiKeyIfNeeded()
+        } else if (isOnboardingCompleted && !apiKeyConfigured) {
+            automationEngine.resumeSilentProvisioningIfPossible()
         }
     }
 
@@ -383,6 +385,15 @@ fun VoiceTypingScreen(
                                 onOpenMenu = openMenu,
                                 onOpenKeepAwake = { showKeepAwakeScreen = true },
                                 onDeleteItem = { RecentDictations.delete(it) },
+                                apiKeyMissingOrInvalid = !apiKeyConfigured || apiKeyErrorReason.isNotBlank(),
+                                isProvisioningKey = provisioningState.status == ProvisioningStatus.PROVISIONING_BACKGROUND ||
+                                    provisioningState.status == ProvisioningStatus.SIGNING_IN,
+                                onConnectApiKey = {
+                                    if (!automationEngine.resumeSilentProvisioningIfPossible()) {
+                                        automationEngine.createOrReuseWebView(forceRecovery = true)
+                                        automationEngine.startGoogleSignIn(signedInGoogleEmail)
+                                    }
+                                },
                                 modifier = Modifier
                                     .fillMaxSize()
                                     .padding(innerPadding)

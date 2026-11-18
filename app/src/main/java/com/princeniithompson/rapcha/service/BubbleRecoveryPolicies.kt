@@ -94,6 +94,7 @@ class KeyboardSettleStateMachine(
  */
 object VisibilityWatchdogDecision {
     const val WATCHDOG_INTERVAL_MS = 5_000L
+    const val IDLE_HEALTHY_WATCHDOG_INTERVAL_MS = 30_000L
     const val GRACE_TICKS = 2
 
     enum class TickAction {
@@ -251,9 +252,9 @@ object RecoveryJobPolicy {
     fun shouldReschedule(
         bubbleEnabled: Boolean,
         hasOverlayPermission: Boolean,
-        @Suppress("UNUSED_PARAMETER") consecutiveSuccesses: Int
+        consecutiveSuccesses: Int
     ): Boolean {
-        return bubbleEnabled && hasOverlayPermission
+        return bubbleEnabled && hasOverlayPermission && consecutiveSuccesses < MAX_CONSECUTIVE_SUCCESSES
     }
 }
 
