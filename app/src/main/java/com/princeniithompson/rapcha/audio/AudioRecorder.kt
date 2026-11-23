@@ -52,10 +52,10 @@ class AudioRecorder(
         const val SAMPLE_RATE = 16000
         const val CHANNEL_CONFIG = AudioFormat.CHANNEL_IN_MONO
         const val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
-        /** 100 ms at 16 kHz 16-bit mono PCM. */
-        const val CHUNK_SIZE_BYTES = 3200
-        /** 20 ms read slices. */
-        private const val SLICE_SIZE_BYTES = 640
+        /** 50 ms at 16 kHz 16-bit mono PCM (lower live preview & tail flush latency). */
+        const val CHUNK_SIZE_BYTES = 1600
+        /** 10 ms read slices (5 slices per 50 ms packet). */
+        private const val SLICE_SIZE_BYTES = 320
         /** About one second of AudioRecord buffer. */
         const val TARGET_BUFFER_BYTES = SAMPLE_RATE * 2
         private const val MIC_OPEN_ATTEMPTS = 3

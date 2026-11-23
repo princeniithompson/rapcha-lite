@@ -238,14 +238,21 @@ fun OnboardingNotificationScreen(
                             fontWeight = FontWeight.SemiBold,
                             color = OnboardingInkBlack
                         )
-                        Spacer(modifier = Modifier.height(16.dp))
+                        Spacer(modifier = Modifier.height(14.dp))
                         Text(
-                            text = "2. It will appear automatically when your text box is active in any app.",
+                            text = "2. Tap it when any text box is open to dictate with Gemini voice.",
                             fontSize = 16.sp,
                             fontWeight = FontWeight.SemiBold,
                             color = OnboardingInkBlack
                         )
-                        Spacer(modifier = Modifier.height(28.dp))
+                        Spacer(modifier = Modifier.height(14.dp))
+                        Text(
+                            text = "3. Press and hold it over any message to Reply, Translate, or fix Grammar.",
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = OnboardingInkBlack
+                        )
+                        Spacer(modifier = Modifier.height(24.dp))
                         Box(
                             modifier = Modifier.fillMaxWidth(),
                             contentAlignment = Alignment.Center

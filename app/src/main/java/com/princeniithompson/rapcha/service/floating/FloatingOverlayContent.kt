@@ -76,6 +76,7 @@ fun FloatingOverlayContent(
                             isRecording = recording,
                             isPendingFinalizing = pendingFinalizing,
                             isPolishing = false,
+                            elapsedSeconds = elapsedSeconds,
                             audioAmplitude = audioAmplitude,
                             glowStyleId = GlowAnimationCatalogue.DEFAULT_ID,
                             bubbleVisible = bubbleVisible,

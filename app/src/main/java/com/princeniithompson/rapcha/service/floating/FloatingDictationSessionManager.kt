@@ -12,12 +12,14 @@ import android.os.PowerManager
 import android.os.SystemClock
 import android.util.Log
 import com.princeniithompson.rapcha.audio.AudioRecorder
+import com.princeniithompson.rapcha.audio.SessionAudioBackup
 import com.princeniithompson.rapcha.data.ConnectionState
 import com.princeniithompson.rapcha.data.CustomVocabularyRepository
 import com.princeniithompson.rapcha.data.DiagnosticSource
 import com.princeniithompson.rapcha.service.FloatingBubbleManager
 import com.princeniithompson.rapcha.websocket.DictationPiecePlanner
 import com.princeniithompson.rapcha.websocket.DictationSessionClock
+import com.princeniithompson.rapcha.websocket.GeminiBatchTranscribeClient
 import com.princeniithompson.rapcha.websocket.GeminiLiveWebSocketClient
 import com.princeniithompson.rapcha.websocket.InterimPreviewMonitor
 import com.princeniithompson.rapcha.websocket.TranscriptSeam
@@ -56,10 +58,10 @@ class FloatingDictationSessionManager(
     companion object {
         private const val TAG = "FloatingDictationMgr"
         const val MIC_ERROR_PREFIX = "MICROPHONE_ERROR:"
-        /** ~15 s of 100 ms chunks held while the socket connects or reconnects. */
-        const val MAX_AUDIO_QUEUE_CHUNKS = 150
+        /** ~15 s of 50 ms chunks held while the socket connects or reconnects. */
+        const val MAX_AUDIO_QUEUE_CHUNKS = 300
         /** Mic keeps reading this long after Complete so the last word is not clipped. */
-        const val COMPLETE_TAIL_MS = 180L
+        const val COMPLETE_TAIL_MS = 120L
 
         internal fun elapsedSeconds(startedAtElapsed: Long, nowElapsed: Long): Int {
             if (startedAtElapsed <= 0L) return 0
@@ -67,13 +69,7 @@ class FloatingDictationSessionManager(
         }
 
         internal fun reconcileFinalTranscript(accumulated: String, endpointFinal: String): String {
-            val acc = accumulated.trim()
-            val fin = endpointFinal.trim()
-            if (fin.isEmpty()) return acc
-            if (acc.isEmpty()) return fin
-            if (fin == acc || acc.endsWith(fin)) return acc
-            if (fin.startsWith(acc) || fin.length >= acc.length) return fin
-            return TranscriptSeam.append(acc, fin)
+            return TranscriptSeam.appendDeduplicated(accumulated, endpointFinal)
         }
     }
 
@@ -81,9 +77,13 @@ class FloatingDictationSessionManager(
 
     /** Ordered audio sender; see [OrderedAudioSender]. */
     private val sender = OrderedAudioSender(MAX_AUDIO_QUEUE_CHUNKS)
+    /** Temporary local PCM backup deleted on session finish; feeds non-live fallback if Live drops/stalls. */
+    private val audioBackup = SessionAudioBackup(context.applicationContext)
 
     @Volatile private var webSocketClient: GeminiLiveWebSocketClient? = null
     private var wakeLock: PowerManager.WakeLock? = null
+    @Volatile private var activeApiKey: String = ""
+    @Volatile private var activeSmartMode: Boolean = true
 
     private var sessionJob: CompletableJob? = null
     private var durationJob: Job? = null
@@ -102,6 +102,8 @@ class FloatingDictationSessionManager(
 
     val sessionChunksSent: Int get() = sender.chunksSent
     val sessionBytesSent: Long get() = sender.bytesSent
+    val localBackupBytes: Long get() = audioBackup.bytesWritten
+    val hasLocalBackupSpeech: Boolean get() = audioBackup.hasSpeech
 
     private val finalizedTranscript = StringBuilder()
     private var interimTranscript = ""
@@ -110,7 +112,10 @@ class FloatingDictationSessionManager(
 
     private val audioRecorder = AudioRecorder(
         onChunkReady = { chunk ->
-            if (isRecording) sender.submit(chunk, webSocketClient?.let(::LiveSink))
+            if (isRecording) {
+                audioBackup.append(chunk)
+                sender.submit(chunk, webSocketClient?.let(::LiveSink))
+            }
         },
         onAmplitudeChanged = { amp -> onAmplitudeChanged(if (isRecording) amp.coerceIn(0f, 1f) else 0f) },
         onError = { err ->
@@ -158,7 +163,10 @@ class FloatingDictationSessionManager(
         finishAtNextPause = false
         sessionStartedAtElapsed = SystemClock.elapsedRealtime()
         durationSeconds = 0
+        activeApiKey = apiKey
+        activeSmartMode = smartMode
         sender.reset()
+        audioBackup.startNewSession()
         registerNetworkCallback()
 
         try {
@@ -196,6 +204,9 @@ class FloatingDictationSessionManager(
             onPieceCommitted = { piece ->
                 if (sessionId != activeSessionId.get()) return@GeminiLiveWebSocketClient
                 appendPiece(piece)
+                if (piece.isNotBlank()) {
+                    audioBackup.resetForCommittedPiece()
+                }
                 interimTranscript = ""
                 onTranscriptUpdated(getFullTranscriptText())
             },
@@ -256,7 +267,7 @@ class FloatingDictationSessionManager(
         )
         webSocketClient = client
 
-        val customVocab = CustomVocabularyRepository.getVocabulary()
+        val customVocab = CustomVocabularyRepository.getTopVocabularyForGemini()
         try {
             client.connect(apiKey = apiKey, model = model, smartMode = smartMode, customVocabulary = customVocab)
         } catch (e: Exception) {
@@ -309,6 +320,7 @@ class FloatingDictationSessionManager(
         stopJob = scope.launch(Dispatchers.IO) {
             try {
                 audioRecorder.stopAndJoin()
+                audioBackup.cleanup()
                 ws?.disconnect()
             } catch (e: Exception) {
                 Log.e(TAG, "Error stopping audio/websocket ($endedReason)", e)
@@ -341,24 +353,100 @@ class FloatingDictationSessionManager(
         if (!isRecording && webSocketClient == null) {
             return getFullTranscriptText()
         }
+        val finishStartedAt = SystemClock.elapsedRealtime()
         releaseMicrophoneNow(COMPLETE_TAIL_MS)
+        val afterTailAt = SystemClock.elapsedRealtime()
 
         val ws = webSocketClient
         val wl = wakeLock
         wakeLock = null
 
+        // Snapshot only pieces genuinely committed BEFORE Complete (e.g. >2:30 piece splits).
+        // audioBackup holds the audio spoken since that snapshot, so a batch fallback replaces
+        // the uncommitted open piece rather than appending onto timed-out raw interim text.
+        val committedBeforeFinish = finalizedTranscript.toString().trim()
+        val interimSnapshot = interimTranscript.trim()
+
         return try {
-            if (ws != null) {
+            val backupHasSpeech = audioBackup.hasSpeech
+            val networkUp = isNetworkAvailableNow()
+            var liveText = ""
+            var liveHealthy = false
+            val liveEligible = ws != null && ws.isLiveStreamHealthyForFinalize && networkUp
+            if (liveEligible) {
                 withContext(Dispatchers.IO) { sender.flush(LiveSink(ws)) }
+                val hasPreview = ws.hasReceivedLivePreview || interimSnapshot.isNotEmpty()
+                val finalTimeout = GeminiLiveWebSocketClient.computeLiveFinalizeTimeoutMs(
+                    recordingSeconds = durationSeconds,
+                    smartMode = activeSmartMode,
+                    hasLivePreview = hasPreview,
+                    hasLocalBackup = backupHasSpeech
+                )
+                liveText = ws.endActivityAndAwaitFinal(timeoutMs = finalTimeout).trim()
+                liveHealthy = !ws.endpointTimedOut && ws.finalSettledFromServer && liveText.isNotEmpty()
+            } else if (ws != null && backupHasSpeech) {
+                Log.i(
+                    TAG,
+                    "Skipping Live finalize wait (healthy=${ws.isLiveStreamHealthyForFinalize}, networkUp=$networkUp); jumping directly to batch fallback"
+                )
             }
-            val finalText = ws?.endActivityAndAwaitFinal().orEmpty().trim()
-            val reconciled = reconcileFinalTranscript(finalizedTranscript.toString(), finalText)
+            val afterLiveAt = SystemClock.elapsedRealtime()
+
+            var finalText = liveText
+            var usedBatchFallback = false
+            if (!liveHealthy && backupHasSpeech && networkUp) {
+                Log.i(
+                    TAG,
+                    "Live stream did not settle cleanly (setup=${ws?.setupComplete}, timedOut=${ws?.endpointTimedOut}); falling back to ${GeminiBatchTranscribeClient.MODEL}"
+                )
+                try {
+                    ws?.disconnect()
+                } catch (_: Exception) {
+                }
+                val exported = withContext(Dispatchers.IO) { audioBackup.exportForFallback() }
+                if (exported != null) {
+                    val topVocab = CustomVocabularyRepository.getTopVocabularyForGemini()
+                    val fallbackText = GeminiBatchTranscribeClient.transcribe(
+                        apiKey = activeApiKey,
+                        audioBytes = exported.bytes,
+                        mimeType = exported.mimeType,
+                        smartMode = activeSmartMode,
+                        customVocabulary = topVocab
+                    )?.trim().orEmpty()
+                    if (fallbackText.isNotEmpty()) {
+                        finalText = fallbackText
+                        usedBatchFallback = true
+                    }
+                }
+            }
+            val afterFallbackAt = SystemClock.elapsedRealtime()
+
+            val reconciled = when {
+                usedBatchFallback -> {
+                    // Join batch output strictly with pre-Complete committed pieces (never raw timed-out interim).
+                    reconcileFinalTranscript(committedBeforeFinish, finalText)
+                }
+                liveHealthy -> {
+                    reconcileFinalTranscript(finalizedTranscript.toString(), finalText)
+                }
+                else -> {
+                    // Emergency offline/error fallback: preserve best available live/interim words once.
+                    val bestEmergency = finalText.ifBlank { interimSnapshot }
+                    reconcileFinalTranscript(committedBeforeFinish, bestEmergency)
+                }
+            }
             if (reconciled.isNotEmpty()) {
                 finalizedTranscript.clear()
                 finalizedTranscript.append(reconciled)
             }
             interimTranscript = ""
             val text = getFullTranscriptText().ifBlank { finalText }
+            Log.i(
+                TAG,
+                "Complete timing: tail_ms=${afterTailAt - finishStartedAt} live_ms=${afterLiveAt - afterTailAt} " +
+                    "fallback_ms=${afterFallbackAt - afterLiveAt} total_ms=${afterFallbackAt - finishStartedAt} " +
+                    "path=${when { liveHealthy -> "live"; usedBatchFallback -> "batch_fallback"; else -> "emergency_interim" }}"
+            )
             onTranscriptUpdated(text)
             text
         } catch (e: Exception) {
@@ -369,6 +457,7 @@ class FloatingDictationSessionManager(
             isRecording = false
             activeCallerScope = null
             unregisterNetworkCallback()
+            audioBackup.cleanup()
             try {
                 ws?.disconnect()
             } catch (e: Exception) {
@@ -442,6 +531,7 @@ class FloatingDictationSessionManager(
         sessionJob?.cancel()
         sessionJob = null
         sender.reset()
+        audioBackup.cleanup()
         try {
             audioRecorder.stop()
             webSocketClient?.disconnect()

@@ -113,6 +113,7 @@ dependencies {
   implementation(libs.androidx.lifecycle.viewmodel.compose)
   implementation(libs.kotlinx.coroutines.android)
   implementation(libs.kotlinx.coroutines.core)
+  implementation(libs.material.kolor)
   implementation(libs.okhttp)
   constraints {
     // v25: Firebase/Retrofit used to pull these up; pin them to the same versions v24 shipped.

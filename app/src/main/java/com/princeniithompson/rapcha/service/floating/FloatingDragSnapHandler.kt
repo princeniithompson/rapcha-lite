@@ -1,12 +1,15 @@
 package com.princeniithompson.rapcha.service.floating
 
+import android.animation.Animator
+import android.animation.AnimatorListenerAdapter
+import android.animation.TimeInterpolator
 import android.animation.ValueAnimator
 import android.content.Context
 import android.util.Log
 import android.view.View
 import android.view.WindowManager
 import android.view.animation.DecelerateInterpolator
-import androidx.core.animation.addListener
+import android.view.animation.OvershootInterpolator
 
 object OverlayVerticalPositionMath {
     fun resolveY(
@@ -40,7 +43,9 @@ class FloatingDragSnapHandler(private val context: Context) {
         private const val TAG = "FloatingDragSnap"
         private const val DEFAULT_IME_OFFSET_DP = 12f
         private const val MIN_GAP_ABOVE_IME_DP = 4f
-        private const val SNAP_ANIMATION_MS = 180L
+        private const val SPRING_SNAP_MS = 240L
+        private const val WAKE_TUCK_ANIM_MS = 240L
+        private const val SLEEP_TUCK_ANIM_MS = 220L
     }
 
     enum class SettlePosition { TOP, BOTTOM }
@@ -105,6 +110,19 @@ class FloatingDragSnapHandler(private val context: Context) {
         currentImeTopPx = imeTopPx.coerceAtLeast(0)
     }
 
+    fun getCollapsedRestingX(windowSize: Int): Int {
+        val displayMetrics = context.resources.displayMetrics
+        val screenWidth = displayMetrics.widthPixels
+        val density = displayMetrics.density
+        val windowPaddingPx = (BubbleChromeGeometry.WINDOW_PADDING_DP * density).toInt()
+        val edgeMarginPx = (BubbleChromeGeometry.EDGE_MARGIN_DP * density).toInt()
+        return if (isSnappedToRight) {
+            (screenWidth - windowSize - edgeMarginPx + windowPaddingPx).coerceAtLeast(0)
+        } else {
+            (edgeMarginPx - windowPaddingPx).coerceAtLeast(0)
+        }
+    }
+
     fun resolveYForWindow(
         windowHeightPx: Int,
         isExpanded: Boolean,
@@ -114,11 +132,15 @@ class FloatingDragSnapHandler(private val context: Context) {
         val screenHeight = displayMetrics.heightPixels
         val density = displayMetrics.density
         val topY = (36 * density).toInt()
-        val fallbackMaxY = if (isExpanded) {
-            (screenHeight - (260 * density).toInt()).coerceAtLeast(topY + (60 * density).toInt())
-        } else {
-            (screenHeight - (80 * density).toInt()).coerceAtLeast(topY + (60 * density).toInt())
+        if (!isExpanded) {
+            // Collapsed lifesaver ring crosses and rests anywhere vertically (including over
+            // the keyboard area) so opening/closing the keyboard never causes vertical jumps.
+            val maxCollapsedY = (screenHeight - windowHeightPx - (16 * density).toInt())
+                .coerceAtLeast(topY + (60 * density).toInt())
+            return savedY.coerceIn(topY, maxCollapsedY)
         }
+        val fallbackMaxY = (screenHeight - (260 * density).toInt())
+            .coerceAtLeast(topY + (60 * density).toInt())
         val minGapPx = (MIN_GAP_ABOVE_IME_DP * density).toInt()
         return OverlayVerticalPositionMath.resolveY(
             savedY = savedY,
@@ -137,7 +159,8 @@ class FloatingDragSnapHandler(private val context: Context) {
         isExpanded: Boolean,
         lp: WindowManager.LayoutParams,
         windowManager: WindowManager?,
-        overlayView: View?
+        overlayView: View?,
+        freeVerticalDrag: Boolean = false
     ) {
         val displayMetrics = context.resources.displayMetrics
         val screenHeight = displayMetrics.heightPixels
@@ -145,18 +168,19 @@ class FloatingDragSnapHandler(private val context: Context) {
         val density = displayMetrics.density
 
         val topY = (32 * density).toInt()
-        val fallbackMaxY = if (isExpanded) {
-            (screenHeight - (260 * density).toInt()).coerceAtLeast(topY + (60 * density).toInt())
-        } else {
-            (screenHeight - (80 * density).toInt()).coerceAtLeast(topY + (60 * density).toInt())
-        }
         val estWindowHeightPx = if (lp.height > 0) {
             lp.height
         } else {
             (BubbleChromeGeometry.IDLE_WINDOW_SIZE_DP * density).toInt()
         }
+        val allowAcrossKeyboard = !isExpanded || freeVerticalDrag
+        val fallbackMaxY = if (isExpanded) {
+            (screenHeight - (260 * density).toInt()).coerceAtLeast(topY + (60 * density).toInt())
+        } else {
+            (screenHeight - estWindowHeightPx - (16 * density).toInt()).coerceAtLeast(topY + (60 * density).toInt())
+        }
         val minGapPx = (MIN_GAP_ABOVE_IME_DP * density).toInt()
-        val maxY = if (currentImeTopPx > 0) {
+        val maxY = if (!allowAcrossKeyboard && currentImeTopPx > 0) {
             minOf(fallbackMaxY, (currentImeTopPx - minGapPx - estWindowHeightPx).coerceAtLeast(topY))
         } else {
             fallbackMaxY
@@ -187,10 +211,13 @@ class FloatingDragSnapHandler(private val context: Context) {
         lp: WindowManager.LayoutParams,
         windowManager: WindowManager?,
         overlayView: View?,
+        releaseRawX: Float? = null,
+        releaseRawY: Float? = null,
         onComplete: () -> Unit
     ) {
         val displayMetrics = context.resources.displayMetrics
         val screenWidth = displayMetrics.widthPixels
+        val screenHeight = displayMetrics.heightPixels
         val density = displayMetrics.density
         val minGapPx = (MIN_GAP_ABOVE_IME_DP * density).toInt()
         val estWindowHeightPx = if (lp.height > 0) {
@@ -199,8 +226,7 @@ class FloatingDragSnapHandler(private val context: Context) {
             (BubbleChromeGeometry.IDLE_WINDOW_SIZE_DP * density).toInt()
         }
 
-        savedY = lp.y
-        val computedOffsetAboveIme = if (currentImeTopPx > 0) {
+        val computedOffsetAboveIme = if (isExpanded && currentImeTopPx > 0) {
             (currentImeTopPx - estWindowHeightPx - lp.y).coerceAtLeast(minGapPx)
         } else {
             null
@@ -208,68 +234,37 @@ class FloatingDragSnapHandler(private val context: Context) {
 
         if (!isExpanded) {
             val windowSize = (BubbleChromeGeometry.IDLE_WINDOW_SIZE_DP * density).toInt()
-            val windowPaddingPx = (BubbleChromeGeometry.WINDOW_PADDING_DP * density).toInt()
-            val edgeMarginPx = (BubbleChromeGeometry.EDGE_MARGIN_DP * density).toInt()
-            val snapRight = (lp.x + windowSize / 2) >= screenWidth / 2
-            val targetX = if (snapRight) {
-                (screenWidth - windowSize - edgeMarginPx + windowPaddingPx).coerceAtLeast(0)
+            val topY = (36 * density).toInt()
+            val maxCollapsedY = (screenHeight - windowSize - (16 * density).toInt())
+                .coerceAtLeast(topY + (60 * density).toInt())
+            val snapRight = if (releaseRawX != null) {
+                releaseRawX >= screenWidth / 2f
             } else {
-                (edgeMarginPx - windowPaddingPx).coerceAtLeast(0)
+                (lp.x + windowSize / 2) >= screenWidth / 2
             }
-            val targetY = lp.y
-
-            val startX = lp.x
-            val startY = lp.y
-            savePreferences(snapRight, targetY, computedOffsetAboveIme)
-
-            val totalDistX = (targetX - startX).toFloat()
-            val totalDistY = (targetY - startY).toFloat()
-
-            snapAnimator?.cancel()
-            if (startX == targetX && startY == targetY) {
-                onComplete()
-                return
+            val rawTargetY = if (releaseRawY != null) {
+                (releaseRawY - windowSize / 2f).toInt()
+            } else {
+                lp.y
             }
+            val targetY = rawTargetY.coerceIn(topY, maxCollapsedY)
+            savePreferences(snapRight, targetY, null)
+            val targetX = getCollapsedRestingX(windowSize)
 
-            snapAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
-                duration = SNAP_ANIMATION_MS
-                interpolator = DecelerateInterpolator(1.6f)
-                addUpdateListener { anim ->
-                    val fraction = anim.animatedFraction
-                    val prevX = lp.x
-                    val prevY = lp.y
-                    val nextX = if (lp.width == WindowManager.LayoutParams.MATCH_PARENT) {
-                        0
-                    } else {
-                        val currentWindowWidth = if (lp.width > 0) lp.width else windowSize
-                        (startX + totalDistX * fraction).toInt().coerceIn(0, (screenWidth - currentWindowWidth).coerceAtLeast(0))
-                    }
-                    val nextY = (startY + totalDistY * fraction).toInt()
-                    if (nextX == prevX && nextY == prevY) return@addUpdateListener
-                    lp.x = nextX
-                    lp.y = nextY
-                    try {
-                        windowManager?.updateViewLayout(overlayView, lp)
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Failed updating layout during snap", e)
-                    }
-                }
-                addListener(object : android.animation.AnimatorListenerAdapter() {
-                    override fun onAnimationEnd(animation: android.animation.Animator) {
-                        val finalX = if (lp.width == WindowManager.LayoutParams.MATCH_PARENT) 0 else targetX
-                        if (lp.x == finalX && lp.y == targetY) return
-                        lp.x = finalX
-                        lp.y = targetY
-                        try {
-                            windowManager?.updateViewLayout(overlayView, lp)
-                        } catch (e: Exception) {
-                            Log.w(TAG, "Failed final layout update", e)
-                        }
-                    }
-                })
-                start()
-            }
+            animateWindowTo(
+                lp = lp,
+                windowManager = windowManager,
+                overlayView = overlayView,
+                targetX = targetX,
+                targetY = targetY,
+                allowOffscreenX = true,
+                durationMs = SPRING_SNAP_MS,
+                interpolator = OvershootInterpolator(1.1f),
+                onComplete = onComplete
+            )
+            return
         } else if (lp.width != WindowManager.LayoutParams.MATCH_PARENT) {
+            savedY = lp.y
             val windowWidth = lp.width.coerceAtLeast(1)
             val windowPaddingPx = (BubbleChromeGeometry.WINDOW_PADDING_DP * density).toInt()
             val snapRight = (lp.x + windowWidth / 2) >= screenWidth / 2
@@ -302,6 +297,160 @@ class FloatingDragSnapHandler(private val context: Context) {
         }
 
         onComplete()
+    }
+
+    /**
+     * Smoothly returns the collapsed lifesaver ring to its saved non-edge resting position
+     * without overwriting saved coordinates (used when Telescope drag releases on highlighted text).
+     */
+    fun animateReturnToRestingPosition(
+        lp: WindowManager.LayoutParams,
+        windowManager: WindowManager?,
+        overlayView: View?,
+        onComplete: () -> Unit
+    ) {
+        val density = context.resources.displayMetrics.density
+        val windowSize = (BubbleChromeGeometry.IDLE_WINDOW_SIZE_DP * density).toInt()
+        val targetX = getCollapsedRestingX(windowSize)
+        val targetY = resolveYForWindow(windowHeightPx = windowSize, isExpanded = false)
+        animateWindowTo(
+            lp = lp,
+            windowManager = windowManager,
+            overlayView = overlayView,
+            targetX = targetX,
+            targetY = targetY,
+            allowOffscreenX = false,
+            durationMs = SPRING_SNAP_MS,
+            interpolator = OvershootInterpolator(1.1f),
+            onComplete = onComplete
+        )
+    }
+
+    /**
+     * Idle sleeping half-ring transition: slides 50% of the circular lifesaver ring off the
+     * nearest left/right screen bezel when sleeping, or springs smoothly back out to its
+     * non-bezel resting position (20dp off edge) when waking — always keeping Y unchanged.
+     */
+    fun animateHalfEdgeTuck(
+        tucked: Boolean,
+        lp: WindowManager.LayoutParams,
+        windowManager: WindowManager?,
+        overlayView: View?,
+        onProgress: (Float) -> Unit = {},
+        onComplete: () -> Unit = {}
+    ) {
+        val displayMetrics = context.resources.displayMetrics
+        val screenWidth = displayMetrics.widthPixels
+        val density = displayMetrics.density
+        val windowSize = (BubbleChromeGeometry.IDLE_WINDOW_SIZE_DP * density).toInt()
+
+        val targetX = if (tucked) {
+            if (isSnappedToRight) {
+                screenWidth - (windowSize / 2)
+            } else {
+                -(windowSize / 2)
+            }
+        } else {
+            getCollapsedRestingX(windowSize)
+        }
+        val animDuration = if (tucked) SLEEP_TUCK_ANIM_MS else WAKE_TUCK_ANIM_MS
+        val animInterpolator: TimeInterpolator = if (tucked) {
+            DecelerateInterpolator(1.6f)
+        } else {
+            OvershootInterpolator(1.25f)
+        }
+        // allowOffscreenX = true in both directions so waking glides smoothly out of the bezel
+        // instead of clamping/teleporting onto the screen edge on frame 1.
+        animateWindowTo(
+            lp = lp,
+            windowManager = windowManager,
+            overlayView = overlayView,
+            targetX = targetX,
+            targetY = lp.y,
+            allowOffscreenX = true,
+            durationMs = animDuration,
+            interpolator = animInterpolator,
+            onFrameFraction = { f ->
+                val tuckProgress = if (tucked) f else (1f - f)
+                onProgress(tuckProgress.coerceIn(0f, 1f))
+            },
+            onComplete = onComplete
+        )
+    }
+
+    private fun animateWindowTo(
+        lp: WindowManager.LayoutParams,
+        windowManager: WindowManager?,
+        overlayView: View?,
+        targetX: Int,
+        targetY: Int,
+        allowOffscreenX: Boolean,
+        durationMs: Long = SPRING_SNAP_MS,
+        interpolator: TimeInterpolator = DecelerateInterpolator(1.6f),
+        onFrameFraction: ((Float) -> Unit)? = null,
+        onComplete: () -> Unit
+    ) {
+        val startX = lp.x
+        val startY = lp.y
+        snapAnimator?.cancel()
+        if (startX == targetX && startY == targetY) {
+            onFrameFraction?.invoke(1f)
+            onComplete()
+            return
+        }
+        val screenWidth = context.resources.displayMetrics.widthPixels
+        val totalDistX = (targetX - startX).toFloat()
+        val totalDistY = (targetY - startY).toFloat()
+
+        snapAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = durationMs
+            this.interpolator = interpolator
+            var cancelled = false
+            addUpdateListener { anim ->
+                val f = anim.animatedValue as Float
+                onFrameFraction?.invoke(f)
+                val rawNextX = (startX + totalDistX * f).toInt()
+                val nextX = if (allowOffscreenX || lp.width == WindowManager.LayoutParams.MATCH_PARENT) {
+                    if (lp.width == WindowManager.LayoutParams.MATCH_PARENT) 0 else rawNextX
+                } else {
+                    val w = if (lp.width > 0) lp.width else 0
+                    rawNextX.coerceIn(0, (screenWidth - w).coerceAtLeast(0))
+                }
+                val nextY = (startY + totalDistY * f).toInt()
+                if (nextX == lp.x && nextY == lp.y) return@addUpdateListener
+                lp.x = nextX
+                lp.y = nextY
+                if (overlayView?.isAttachedToWindow == true) {
+                    try {
+                        windowManager?.updateViewLayout(overlayView, lp)
+                    } catch (_: Throwable) {
+                    }
+                }
+            }
+            addListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationCancel(animation: Animator) {
+                    cancelled = true
+                }
+
+                override fun onAnimationEnd(animation: Animator) {
+                    if (cancelled) return
+                    val finalX = if (lp.width == WindowManager.LayoutParams.MATCH_PARENT) 0 else targetX
+                    onFrameFraction?.invoke(1f)
+                    if (lp.x != finalX || lp.y != targetY) {
+                        lp.x = finalX
+                        lp.y = targetY
+                        if (overlayView?.isAttachedToWindow == true) {
+                            try {
+                                windowManager?.updateViewLayout(overlayView, lp)
+                            } catch (_: Throwable) {
+                            }
+                        }
+                    }
+                    onComplete()
+                }
+            })
+            start()
+        }
     }
 
     fun cancel() {

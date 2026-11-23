@@ -28,6 +28,7 @@ class VoiceTypingViewModel(application: Application) : AndroidViewModel(applicat
     val customApiKey: StateFlow<String> = _customApiKey.asStateFlow()
 
     val isBubbleEnabled: StateFlow<Boolean> = com.princeniithompson.rapcha.service.FloatingBubbleManager.isBubbleEnabled
+    val isAlwaysOnScreen: StateFlow<Boolean> = com.princeniithompson.rapcha.service.FloatingBubbleManager.isAlwaysOnScreen
     val isAccessibilityConnected: StateFlow<Boolean> = com.princeniithompson.rapcha.service.FloatingBubbleManager.isAccessibilityConnected
     val hasOverlayPermission: StateFlow<Boolean> = com.princeniithompson.rapcha.service.FloatingBubbleManager.hasOverlayPermission
 
@@ -97,6 +98,10 @@ class VoiceTypingViewModel(application: Application) : AndroidViewModel(applicat
 
     fun setBubbleEnabled(enabled: Boolean) {
         com.princeniithompson.rapcha.service.FloatingBubbleManager.setBubbleEnabled(getApplication(), enabled)
+    }
+
+    fun setAlwaysOnScreen(enabled: Boolean) {
+        com.princeniithompson.rapcha.service.FloatingBubbleManager.setAlwaysOnScreen(getApplication(), enabled)
     }
 
     val effectiveApiKey: String

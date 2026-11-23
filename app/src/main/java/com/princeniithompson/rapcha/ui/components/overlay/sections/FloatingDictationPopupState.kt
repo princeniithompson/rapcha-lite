@@ -227,10 +227,21 @@ fun rememberFloatingDictationPopupState(
     }
 
     val scrollState = rememberScrollState()
-    LaunchedEffect(transcriptText) {
-        if (transcriptText.isNotEmpty()) {
-            withFrameNanos { }
-            scrollState.scrollTo(scrollState.maxValue)
+    // Movie end-credits upward roll: whenever new speech wraps onto a new line (maxValue grows),
+    // smoothly glide upward with a critically-damped low-stiffness spring (~435ms, zero bounce,
+    // full velocity continuity if speech wraps again mid-roll).
+    LaunchedEffect(scrollState.maxValue) {
+        val target = scrollState.maxValue
+        when {
+            target == 0 && scrollState.value != 0 -> scrollState.scrollTo(0)
+            target > scrollState.value -> scrollState.animateScrollTo(
+                value = target,
+                animationSpec = spring(
+                    dampingRatio = Spring.DampingRatioNoBouncy,
+                    stiffness = 180f
+                )
+            )
+            target < scrollState.value -> scrollState.scrollTo(target)
         }
     }
 

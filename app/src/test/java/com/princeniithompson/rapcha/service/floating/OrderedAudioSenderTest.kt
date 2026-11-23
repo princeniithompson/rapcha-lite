@@ -59,7 +59,7 @@ class OrderedAudioSenderTest {
 
     @Test
     fun `fifteen seconds are held while connecting`() {
-        assertEquals(150, FloatingDictationSessionManager.MAX_AUDIO_QUEUE_CHUNKS)
+        assertEquals(300, FloatingDictationSessionManager.MAX_AUDIO_QUEUE_CHUNKS)
         assertEquals(true, FloatingDictationSessionManager.COMPLETE_TAIL_MS in 100L..250L)
     }
 }

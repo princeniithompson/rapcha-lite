@@ -16,9 +16,13 @@ import androidx.test.core.app.ApplicationProvider
 import com.princeniithompson.rapcha.core.ApiConfig
 import com.princeniithompson.rapcha.core.ApiKeyFormat
 import com.princeniithompson.rapcha.core.ApiKeyVault
+import com.princeniithompson.rapcha.service.FloatingBubbleManager
 import com.princeniithompson.rapcha.ui.screens.onboarding.OnboardingGoogleHandoffScreen
 import com.princeniithompson.rapcha.ui.screens.onboarding.OnboardingGoogleSignInScreen
 import com.princeniithompson.rapcha.ui.screens.onboarding.OnboardingHeroWelcomeScreen
+import com.princeniithompson.rapcha.ui.screens.onboarding.OnboardingSandboxScreen
+import com.princeniithompson.rapcha.ui.screens.onboarding.OnboardingStage
+import com.princeniithompson.rapcha.ui.screens.onboarding.OnboardingTelescopePracticeScreen
 import com.princeniithompson.rapcha.ui.screens.onboarding.provisioning.ProvisioningWebMath
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -61,6 +65,7 @@ class OnboardingProvisioningTest {
 
     @After
     fun tearDown() = runBlocking {
+        FloatingBubbleManager.isOnboardingActive = false
         ApiKeyVault.clearUserCredentials(app)
         ApiKeyVault.resetForTesting()
     }
@@ -140,7 +145,9 @@ class OnboardingProvisioningTest {
         }
         composeRule.waitForIdle()
         composeRule.onNodeWithTag("onboarding_hero_welcome_screen").assertIsDisplayed()
-        composeRule.onNodeWithText("4x faster than typing").assertIsDisplayed()
+        composeRule.onNodeWithTag("hero_lifesaver_beacon").assertIsDisplayed()
+        composeRule.onNodeWithTag("hero_feature_showcase_card").assertIsDisplayed()
+        composeRule.onNodeWithText("Speak naturally.\nWrite effortlessly.").assertIsDisplayed()
         composeRule.onNodeWithTag("btn_hero_get_started").performClick()
         assertTrue(started)
     }
@@ -298,5 +305,78 @@ class OnboardingProvisioningTest {
         composeRule.onNodeWithTag("btn_onboarding_finish").performClick()
         assertFalse(finished)
         assertTrue(retriedKey)
+    }
+
+    @Test
+    fun `onboarding stages place permissions before voice and telescope practice`() {
+        assertEquals(9, OnboardingStage.TOTAL_PROGRESS_SEGMENTS)
+        assertTrue(OnboardingStage.OVERLAY_PERMISSION.progressIndex < OnboardingStage.SANDBOX.progressIndex)
+        assertTrue(OnboardingStage.KEEP_AWAKE.progressIndex < OnboardingStage.SANDBOX.progressIndex)
+        assertTrue(OnboardingStage.ACCESSIBILITY_GUIDE.progressIndex < OnboardingStage.SANDBOX.progressIndex)
+        assertTrue(OnboardingStage.SANDBOX.progressIndex < OnboardingStage.TELESCOPE_PRACTICE.progressIndex)
+        assertTrue(OnboardingStage.TELESCOPE_PRACTICE.progressIndex < OnboardingStage.NOTIFICATION_PERMISSION.progressIndex)
+    }
+
+    @Test
+    fun `sandbox screen hides legacy polish pill and shows activating key status`() {
+        var completed = false
+        composeRule.setContent {
+            OnboardingSandboxScreen(
+                onComplete = { completed = true },
+                isApiKeyReady = false,
+                isActivatingKey = true
+            )
+        }
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("sandbox_key_activating_pill").assertIsDisplayed()
+        composeRule.onNodeWithText("Polish").assertDoesNotExist()
+        composeRule.onNodeWithTag("btn_sandbox_skip").performClick()
+        assertTrue(completed)
+    }
+
+    @Test
+    fun `telescope practice screen supports preview highlight reply and insert flow`() {
+        var continued = false
+        composeRule.setContent {
+            OnboardingTelescopePracticeScreen(
+                onComplete = { continued = true },
+                isApiKeyReady = false
+            )
+        }
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("onboarding_telescope_practice_screen").assertIsDisplayed()
+        composeRule.onNodeWithTag("telescope_target_message").assertIsDisplayed()
+        composeRule.onNodeWithTag("telescope_draggable_bubble").assertIsDisplayed()
+
+        composeRule.onNodeWithTag("btn_telescope_tap_try").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("telescope_action_bar").assertIsDisplayed()
+
+        composeRule.onNodeWithTag("action_bar_${com.princeniithompson.rapcha.data.ToneRepository.MODULE_REPLY}")
+            .performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("reply_chip_short").performClick()
+        composeRule.waitForIdle()
+
+        composeRule.waitUntil(timeoutMillis = 3_000) {
+            runCatching {
+                composeRule.onNodeWithTag("telescope_result_insert").assertIsDisplayed()
+                true
+            }.getOrDefault(false)
+        }
+        composeRule.onNodeWithTag("telescope_result_card").assertIsDisplayed()
+        composeRule.onNodeWithTag("telescope_result_insert").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("telescope_inserted_reply_bubble").assertIsDisplayed()
+        composeRule.onNodeWithTag("btn_telescope_continue").performClick()
+        assertTrue(continued)
+    }
+
+    @Test
+    fun `floating bubble manager suppresses background starts during onboarding`() {
+        FloatingBubbleManager.isOnboardingActive = true
+        val started = FloatingBubbleManager.startBubbleService(app, source = "accessibility_auto")
+        assertFalse(started)
+        FloatingBubbleManager.isOnboardingActive = false
     }
 }

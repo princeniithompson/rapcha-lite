@@ -2,198 +2,203 @@ package com.princeniithompson.rapcha.ui.theme
 
 import android.content.Context
 import android.os.Build
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.ColorScheme
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.dynamicDarkColorScheme
-import androidx.compose.material3.dynamicLightColorScheme
-import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
-import com.princeniithompson.rapcha.service.FloatingBubbleManager
+import com.materialkolor.DynamicMaterialTheme
+import com.materialkolor.PaletteStyle
+import com.materialkolor.dynamicColorScheme
+import com.materialkolor.hct.Hct
+import com.materialkolor.rememberDynamicMaterialThemeState
 
-private val DarkColorScheme = darkColorScheme(
-    primary = CyanPrimary,
-    onPrimary = CyanOnPrimary,
-    primaryContainer = CyanPrimaryContainer,
-    onPrimaryContainer = CyanOnPrimaryContainer,
-    secondary = VioletSecondary,
-    onSecondary = VioletOnSecondary,
-    secondaryContainer = VioletSecondaryContainer,
-    onSecondaryContainer = VioletOnSecondaryContainer,
-    tertiary = CoralTertiary,
-    onTertiary = CoralOnTertiary,
-    background = DarkBackground,
-    surface = DarkSurface,
-    surfaceVariant = DarkSurfaceVariant,
-    onSurface = DarkOnSurface,
-    onSurfaceVariant = DarkOnSurfaceVariant,
-    outline = DarkOutline,
-    error = Color(0xFFEF4444),
-    errorContainer = Color(0xFF7F1D1D),
-    onError = Color.White,
-    onErrorContainer = Color(0xFFFECACA)
-)
-
-private val LightColorScheme = lightColorScheme(
-    primary = Color(0xFF006874),
-    onPrimary = Color.White,
-    primaryContainer = Color(0xFF9EEFFF),
-    onPrimaryContainer = Color(0xFF001F24),
-    secondary = Color(0xFF6B4EA2),
-    onSecondary = Color.White,
-    secondaryContainer = Color(0xFFECDCFF),
-    onSecondaryContainer = Color(0xFF24005B),
-    tertiary = Color(0xFF9E2A43),
-    onTertiary = Color.White,
-    background = Color(0xFFF8FAFC),
-    surface = Color(0xFFFFFFFF),
-    surfaceVariant = Color(0xFFE2E8F0),
-    onSurface = Color(0xFF0F172A),
-    onSurfaceVariant = Color(0xFF475569),
-    outline = Color(0xFFCBD5E1),
-    error = Color(0xFFDC2626),
-    errorContainer = Color(0xFFFEE2E2),
-    onError = Color.White,
-    onErrorContainer = Color(0xFF7F1D1D)
-)
+/** Signature Rapcha teal/emerald seed used on Android <12 or when dynamic wallpaper color is disabled. */
+private val RapchaBrandSeed = Color(0xFF00895B)
 
 /**
- * Extracts and blends the user's Android 12+ wallpaper dynamic colors into a unified 4-tone palette:
- * - Luminous: Bright, airy surfaces and containers
- * - Deep: Rich deep tones for active controls, buttons, and bold headers
- * - Muted: Soft tones for secondary elements and subtle borders
- * - Accent: Complementary tertiary tones (e.g. pink accent on blue wallpaper)
+ * Resolves the seed color for MaterialKolor:
+ * - On Android 12+ with [dynamicColor] enabled, extracts the user's live wallpaper primary accent
+ *   (`system_accent1_500`) so both Light and Dark Material 3 schemes stay harmonized with Material You.
+ * - Falls back cleanly to [RapchaBrandSeed] on older Android versions or in headless test environments.
  */
-fun getAppDynamicColorScheme(context: Context, darkTheme: Boolean, toneId: String): ColorScheme {
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+fun resolveThemeSeedColor(context: Context, dynamicColor: Boolean = true): Color {
+    if (dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
         try {
-            val a1_100 = Color(ContextCompat.getColor(context, android.R.color.system_accent1_100))
-            val a1_200 = Color(ContextCompat.getColor(context, android.R.color.system_accent1_200))
-            val a1_500 = Color(ContextCompat.getColor(context, android.R.color.system_accent1_500))
-            val a1_600 = Color(ContextCompat.getColor(context, android.R.color.system_accent1_600))
-            val a1_700 = Color(ContextCompat.getColor(context, android.R.color.system_accent1_700))
-            val a1_800 = Color(ContextCompat.getColor(context, android.R.color.system_accent1_800))
-            val a1_900 = Color(ContextCompat.getColor(context, android.R.color.system_accent1_900))
-
-            val a2_100 = Color(ContextCompat.getColor(context, android.R.color.system_accent2_100))
-            val a2_200 = Color(ContextCompat.getColor(context, android.R.color.system_accent2_200))
-            val a2_600 = Color(ContextCompat.getColor(context, android.R.color.system_accent2_600))
-            val a2_700 = Color(ContextCompat.getColor(context, android.R.color.system_accent2_700))
-
-            val a3_100 = Color(ContextCompat.getColor(context, android.R.color.system_accent3_100))
-            val a3_200 = Color(ContextCompat.getColor(context, android.R.color.system_accent3_200))
-            val a3_500 = Color(ContextCompat.getColor(context, android.R.color.system_accent3_500))
-            val a3_600 = Color(ContextCompat.getColor(context, android.R.color.system_accent3_600))
-            val a3_700 = Color(ContextCompat.getColor(context, android.R.color.system_accent3_700))
-
-            val n1_50 = Color(ContextCompat.getColor(context, android.R.color.system_neutral1_50))
-            val n1_100 = Color(ContextCompat.getColor(context, android.R.color.system_neutral1_100))
-            val n1_800 = Color(ContextCompat.getColor(context, android.R.color.system_neutral1_800))
-            val n1_900 = Color(ContextCompat.getColor(context, android.R.color.system_neutral1_900))
-
-            val n2_100 = Color(ContextCompat.getColor(context, android.R.color.system_neutral2_100))
-            val n2_200 = Color(ContextCompat.getColor(context, android.R.color.system_neutral2_200))
-
-            if (!darkTheme) {
-                // Light mode with 4-tone dynamic blending
-                val (primaryCol, primaryCont) = when (toneId) {
-                    "deep" -> Pair(a1_800, a1_200)
-                    "muted" -> Pair(a2_700, a2_100)
-                    "tertiary" -> Pair(a3_700, a3_100)
-                    else -> Pair(a1_700, a1_100) // Luminous
-                }
-                val (secCol, secCont) = when (toneId) {
-                    "muted" -> Pair(a1_600, a1_100)
-                    else -> Pair(a2_600, a2_100)
-                }
-                val (tertCol, tertCont) = Pair(a3_600, a3_100)
-
-                return lightColorScheme(
-                    primary = primaryCol,
-                    onPrimary = Color.White,
-                    primaryContainer = primaryCont,
-                    onPrimaryContainer = a1_900,
-                    secondary = secCol,
-                    onSecondary = Color.White,
-                    secondaryContainer = secCont,
-                    onSecondaryContainer = Color(0xFF1E1B4B),
-                    tertiary = tertCol,
-                    onTertiary = Color.White,
-                    tertiaryContainer = tertCont,
-                    onTertiaryContainer = Color(0xFF4C0519),
-                    background = n1_50,
-                    surface = Color.White,
-                    surfaceVariant = n2_100,
-                    onSurface = n1_900,
-                    onSurfaceVariant = n1_800,
-                    outline = n2_200,
-                    outlineVariant = a1_100,
-                    error = Color(0xFFDC2626),
-                    errorContainer = Color(0xFFFEE2E2),
-                    onError = Color.White,
-                    onErrorContainer = Color(0xFF7F1D1D)
-                )
-            } else {
-                // Deep / Dark mode with wallpaper-derived deep violet/neutral background & inverted surfaces
-                return darkColorScheme(
-                    primary = a1_200,
-                    onPrimary = a1_900,
-                    primaryContainer = a1_800,
-                    onPrimaryContainer = Color.White,
-                    secondary = a2_200,
-                    onSecondary = a2_700,
-                    secondaryContainer = a2_700,
-                    onSecondaryContainer = Color.White,
-                    tertiary = a3_200,
-                    onTertiary = a3_700,
-                    background = n1_900,
-                    surface = n1_800,
-                    surfaceVariant = n1_800,
-                    onSurface = n1_50,
-                    onSurfaceVariant = n1_100,
-                    outline = n2_200.copy(alpha = 0.4f),
-                    outlineVariant = a1_800,
-                    error = Color(0xFFEF4444),
-                    errorContainer = Color(0xFF7F1D1D),
-                    onError = Color.White,
-                    onErrorContainer = Color(0xFFFECACA)
-                )
-            }
+            return Color(ContextCompat.getColor(context, android.R.color.system_accent1_500))
         } catch (_: Throwable) {
-            return try {
-                if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-            } catch (_: Throwable) {
-                if (darkTheme) DarkColorScheme else LightColorScheme
-            }
+            // Fall through to brand seed in headless/Robolectric environments.
         }
     }
-    return if (darkTheme) DarkColorScheme else LightColorScheme
+    return RapchaBrandSeed
 }
 
+private fun hctColor(hue: Double, chroma: Double, tone: Double): Color {
+    return Color(Hct.from(hue, chroma, tone).toInt())
+}
+
+/**
+ * Shapes MaterialKolor's base [ColorScheme] into Rapcha's signature full-tint dynamic look:
+ * - **Light theme:** Lush pastel wallpaper-tinted canvas (`background`) paired with crisp pure-white
+ *   cards (`surface` / `surfaceContainerLowest`) and rich deep-accent actions (`primary`).
+ * - **Dark theme:** Very deep, atmospheric wallpaper-tinted night canvas (`background`) paired with
+ *   visibly lighter, richly tinted elevated cards (`surface` / `surfaceContainer`), soft tinted rims
+ *   (`outlineVariant`), and luminous wallpaper accents (`primary` / `secondaryContainer`).
+ *
+ * Uses MaterialKolor's perceptual HCT color engine so every wallpaper hue automatically maintains
+ * balanced saturation and WCAG AA/AAA text contrast.
+ */
+internal fun applyRapchaTonalPersonality(
+    base: ColorScheme,
+    seedColor: Color,
+    isDark: Boolean
+): ColorScheme {
+    val seedHct = Hct.fromInt(seedColor.toArgb())
+    val hue = seedHct.hue
+    // Respect monochrome / near-grayscale wallpapers without injecting artificial color.
+    if (seedHct.chroma < 12.0) {
+        return if (!isDark) {
+            base.copy(
+                surface = Color.White,
+                surfaceContainerLowest = Color.White
+            )
+        } else {
+            base.copy(
+                background = hctColor(hue, 4.0, 7.0),
+                surface = hctColor(hue, 5.0, 16.5),
+                surfaceContainer = hctColor(hue, 5.0, 16.5),
+                surfaceContainerHigh = hctColor(hue, 6.0, 22.0)
+            )
+        }
+    }
+
+    val chroma = seedHct.chroma
+
+    return if (!isDark) {
+        val canvasBg = hctColor(hue, chroma.coerceIn(30.0, 48.0), 93.0)
+        val deepInk = hctColor(hue, 20.0, 12.0)
+        val mutedInk = hctColor(hue, 18.0, 34.0)
+        val vibrantPrimary = hctColor(hue, chroma.coerceIn(46.0, 66.0), 29.0)
+        val luminousPill = hctColor(hue, chroma.coerceIn(48.0, 70.0), 83.0)
+        val pillInk = hctColor(hue, 36.0, 14.0)
+
+        base.copy(
+            primary = vibrantPrimary,
+            onPrimary = Color.White,
+            primaryContainer = luminousPill,
+            onPrimaryContainer = pillInk,
+            secondaryContainer = luminousPill,
+            onSecondaryContainer = pillInk,
+            background = canvasBg,
+            onBackground = deepInk,
+            surface = Color.White,
+            onSurface = deepInk,
+            surfaceVariant = hctColor(hue, chroma.coerceIn(24.0, 40.0), 89.0),
+            onSurfaceVariant = mutedInk,
+            surfaceContainerLowest = Color.White,
+            surfaceContainerLow = hctColor(hue, 14.0, 97.5),
+            surfaceContainer = hctColor(hue, 22.0, 95.0),
+            surfaceContainerHigh = hctColor(hue, chroma.coerceIn(22.0, 38.0), 91.5),
+            surfaceContainerHighest = hctColor(hue, chroma.coerceIn(26.0, 42.0), 88.0),
+            outline = hctColor(hue, 22.0, 48.0),
+            outlineVariant = hctColor(hue, 24.0, 79.0)
+        )
+    } else {
+        val deepCanvasBg = hctColor(hue, chroma.coerceIn(26.0, 40.0), 7.0)
+        val liftedCardSurface = hctColor(hue, chroma.coerceIn(28.0, 44.0), 17.5)
+        val crispInk = hctColor(hue, 12.0, 94.5)
+        val softMutedInk = hctColor(hue, 18.0, 78.0)
+        val luminousPrimary = hctColor(hue, chroma.coerceIn(50.0, 70.0), 78.0)
+        val onLuminousPrimary = hctColor(hue, 36.0, 12.0)
+        val darkAccentContainer = hctColor(hue, chroma.coerceIn(42.0, 60.0), 29.0)
+        val onDarkAccentContainer = hctColor(hue, 28.0, 93.5)
+
+        base.copy(
+            primary = luminousPrimary,
+            onPrimary = onLuminousPrimary,
+            primaryContainer = darkAccentContainer,
+            onPrimaryContainer = onDarkAccentContainer,
+            secondaryContainer = hctColor(hue, chroma.coerceIn(44.0, 62.0), 31.0),
+            onSecondaryContainer = onDarkAccentContainer,
+            background = deepCanvasBg,
+            onBackground = crispInk,
+            surface = liftedCardSurface,
+            onSurface = crispInk,
+            surfaceVariant = hctColor(hue, chroma.coerceIn(28.0, 44.0), 21.0),
+            onSurfaceVariant = softMutedInk,
+            surfaceContainerLowest = hctColor(hue, chroma.coerceIn(22.0, 34.0), 5.0),
+            surfaceContainerLow = hctColor(hue, chroma.coerceIn(26.0, 40.0), 13.0),
+            surfaceContainer = liftedCardSurface,
+            surfaceContainerHigh = hctColor(hue, chroma.coerceIn(30.0, 46.0), 23.5),
+            surfaceContainerHighest = hctColor(hue, chroma.coerceIn(32.0, 48.0), 28.0),
+            outline = hctColor(hue, chroma.coerceIn(24.0, 38.0), 46.0),
+            outlineVariant = hctColor(hue, chroma.coerceIn(26.0, 40.0), 30.0)
+        )
+    }
+}
+
+/**
+ * Generates a complete Material 3 [ColorScheme] using MaterialKolor's HCT engine with Rapcha's
+ * full-tint Light and deep-tinted Dark surface personality.
+ */
+fun getAppDynamicColorScheme(
+    context: Context,
+    darkTheme: Boolean,
+    toneId: String = "luminous"
+): ColorScheme {
+    val seed = resolveThemeSeedColor(context, dynamicColor = true)
+    val style = when (toneId) {
+        "muted" -> PaletteStyle.Neutral
+        "deep" -> PaletteStyle.Vibrant
+        else -> PaletteStyle.TonalSpot
+    }
+    return dynamicColorScheme(
+        seedColor = seed,
+        isDark = darkTheme,
+        isAmoled = false,
+        style = style,
+        modifyColorScheme = { base -> applyRapchaTonalPersonality(base, seed, darkTheme) }
+    )
+}
+
+/**
+ * Root Rapcha Material 3 theme powered by MaterialKolor ([DynamicMaterialTheme]).
+ *
+ * Defaults to Light theme ([darkTheme] = false) and smoothly animates all Material 3 roles when
+ * [animate] is enabled and the user toggles Light/Dark in Settings.
+ */
 @Composable
 fun MyApplicationTheme(
     darkTheme: Boolean = false,
     dynamicColor: Boolean = true,
     toneId: String = "luminous",
+    animate: Boolean = false,
     content: @Composable () -> Unit
 ) {
     val context = LocalContext.current
-    val colorScheme = when {
-        dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
-            getAppDynamicColorScheme(context, darkTheme, toneId)
-        }
-        darkTheme -> DarkColorScheme
-        else -> LightColorScheme
+    val configuration = LocalConfiguration.current
+    val seedColor = remember(context, dynamicColor, configuration) {
+        resolveThemeSeedColor(context, dynamicColor = dynamicColor)
+    }
+    val style = when (toneId) {
+        "muted" -> PaletteStyle.Neutral
+        "deep" -> PaletteStyle.Vibrant
+        else -> PaletteStyle.TonalSpot
     }
 
-    MaterialTheme(
-        colorScheme = colorScheme,
+    val themeState = rememberDynamicMaterialThemeState(
+        seedColor = seedColor,
+        isDark = darkTheme,
+        style = style,
+        modifyColorScheme = { base -> applyRapchaTonalPersonality(base, seedColor, darkTheme) }
+    )
+
+    DynamicMaterialTheme(
+        state = themeState,
+        animate = animate,
         typography = Typography,
         content = content
     )

@@ -62,18 +62,22 @@ class FloatingBubbleService : Service() {
         internal fun decideRingTap(
             recording: Boolean,
             keyboardVisible: Boolean,
-            fieldFocused: Boolean
+            fieldFocused: Boolean,
+            alwaysOnScreen: Boolean = false
         ): RingTap {
+            if (alwaysOnScreen) return RingTap.CONTINUE
             // A blinking cursor with no keyboard is the same as nothing focused: hide, don't start.
             return if (!recording && !keyboardVisible) RingTap.HIDE else RingTap.CONTINUE
         }
 
-        /** Field focus alone does not start a session. The keyboard has to be on screen. */
+        /** Field focus alone does not start a session unless Always on Screen is active. */
         internal fun startsRecordingOnTap(
             recording: Boolean,
             keyboardVisible: Boolean,
-            fieldFocused: Boolean
+            fieldFocused: Boolean,
+            alwaysOnScreen: Boolean = false
         ): Boolean {
+            if (alwaysOnScreen) return !recording
             return !recording && keyboardVisible &&
                 decideRingTap(recording, keyboardVisible, fieldFocused) == RingTap.CONTINUE
         }
@@ -83,10 +87,14 @@ class FloatingBubbleService : Service() {
 
         /**
          * The short keyboard re-check hides the bubble whenever the IME window is gone,
-         * including when an editable field is still focused. An active session stays up.
+         * unless Always on Screen is enabled or an active session is running.
          */
-        internal fun keyboardRecheckShouldHide(imeVisible: Boolean, sessionActive: Boolean): Boolean {
-            return !imeVisible && !sessionActive
+        internal fun keyboardRecheckShouldHide(
+            imeVisible: Boolean,
+            sessionActive: Boolean,
+            alwaysOnScreen: Boolean = false
+        ): Boolean {
+            return !alwaysOnScreen && !imeVisible && !sessionActive
         }
     }
 
@@ -244,12 +252,15 @@ class FloatingBubbleService : Service() {
         serviceScope.launch(Dispatchers.IO) {
             try {
                 CustomVocabularyRepository.init(this@FloatingBubbleService)
+                com.princeniithompson.rapcha.data.ToneRepository.init(this@FloatingBubbleService)
+                com.princeniithompson.rapcha.data.RecentDictations.load(this@FloatingBubbleService)
             } catch (t: Throwable) {
                 Log.w(TAG, "Background service init failed: ${t.javaClass.simpleName}")
             }
         }
 
         FloatingBubbleManager.loadBubbleChrome(this)
+        FloatingBubbleManager.isAlwaysOnScreenSync(this)
         overlayWindowManager = FloatingOverlayWindowManager(this)
         sessionManager = FloatingDictationSessionManager(
             context = this,
@@ -319,8 +330,35 @@ class FloatingBubbleService : Service() {
             onRingClick = { onRingClicked() },
             onCancelClick = { onCancelClicked() },
             onCompleteClick = { onConfirmClicked() },
-            onRepairClick = { openRepairDestination() }
+            onRepairClick = { openRepairDestination() },
+            onTelescopeInsertText = { generatedText -> onTelescopeInsertText(generatedText) }
         )
+    }
+
+    private fun onTelescopeInsertText(generatedText: String) {
+        val text = generatedText.trim()
+        if (text.isEmpty()) return
+        serviceScope.launch {
+            val result = FloatingTextInjector.injectReporting(this@FloatingBubbleService, text)
+            if (result is RapchaTextInserter.InsertionResult.SuccessClipboardFallback) {
+                Toast.makeText(
+                    this@FloatingBubbleService,
+                    "Copied to clipboard (no active text field)",
+                    Toast.LENGTH_SHORT
+                ).show()
+            } else if (result is RapchaTextInserter.InsertionResult.Failed) {
+                Toast.makeText(
+                    this@FloatingBubbleService,
+                    "Could not insert text",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        }
+    }
+
+    fun onAlwaysOnScreenChanged(enabled: Boolean) {
+        if (!componentsReady()) return
+        overlayWindowManager.onAlwaysOnScreenChanged(enabled, isBubbleSessionActive())
     }
 
     private fun rebuildOverlayIfNeeded(reason: String) {
@@ -643,12 +681,13 @@ class FloatingBubbleService : Service() {
         val keyboard = access?.isImeVisibleNow() == true
         val field = access?.hasFocusedEditableField() == true
         val recording = ::sessionManager.isInitialized && sessionManager.isRecording
-        if (decideRingTap(recording, keyboard, field) == RingTap.HIDE) {
+        val alwaysOn = FloatingBubbleManager.isAlwaysOnScreen.value
+        if (decideRingTap(recording, keyboard, field, alwaysOn) == RingTap.HIDE) {
             FloatingBubbleManager.noteBubbleHideSignal()
             overlayWindowManager.onKeyboardVisibilityChanged(isVisible = false, isSessionActive = false)
             return
         }
-        if (startsRecordingOnTap(recording, keyboard, field)) {
+        if (startsRecordingOnTap(recording, keyboard, field, alwaysOn)) {
             startVoiceTyping()
         }
     }
@@ -703,6 +742,7 @@ class FloatingBubbleService : Service() {
         val selectedModel = prefs.getString("selected_model", GeminiLiveWebSocketClient.DEFAULT_MODEL)
             ?: GeminiLiveWebSocketClient.DEFAULT_MODEL
 
+        RapchaAccessibilityService.instance?.armInputConnectionKeepAlive()
         sessionManager.startSession(
             context = this,
             scope = serviceScope,
@@ -715,6 +755,7 @@ class FloatingBubbleService : Service() {
     private fun stopVoiceTyping(endedReason: String = "completed") {
         val isFinalizing = ::overlayWindowManager.isInitialized && overlayWindowManager.overlayPendingFinalizing.value
         if (!sessionManager.isRecording && !isFinalizing) return
+        RapchaAccessibilityService.instance?.disarmInputConnectionKeepAlive()
         FloatingBubbleManager.setRecordingState(false)
         overlayWindowManager.overlayRecording.value = false
         overlayWindowManager.resetInactivityTimer()
@@ -737,13 +778,25 @@ class FloatingBubbleService : Service() {
     }
 
     /**
-     * A fatal Live error while recording. Words already transcribed are still placed the
-     * normal way; otherwise the session closes with a notification.
+     * A Live error while recording.
+     * - Microphone or invalid API key errors abort immediately (cannot recover).
+     * - Network/WebSocket drops stay alive while recording continues into [SessionAudioBackup];
+     *   tapping Complete automatically falls back to non-live `gemini-3.5-transcribe`.
      */
     private fun onSessionError(err: String) {
         Log.w(TAG, "Session error: $err")
         if (!sessionManager.isRecording) return
         val isMicError = err.startsWith(FloatingDictationSessionManager.MIC_ERROR_PREFIX)
+        val isKeyFailure = !isMicError &&
+            com.princeniithompson.rapcha.data.DictationEndedReason.fromMessage(err) ==
+            com.princeniithompson.rapcha.data.DictationEndedReason.MISSING_API_KEY
+
+        if (!isMicError && !isKeyFailure) {
+            Log.i(TAG, "Keeping recording alive on local backup for non-live fallback on Complete")
+            FloatingBubbleManager.setNetworkProblem(true)
+            return
+        }
+
         val partial = sessionManager.getFullTranscriptText()
         if (partial.isNotBlank()) {
             if (isMicError) {
@@ -753,9 +806,6 @@ class FloatingBubbleService : Service() {
             performInjectionAndClose(partial)
         } else {
             stopVoiceTyping(endedReason = if (isMicError) "microphone_error" else "error")
-            val isKeyFailure = !isMicError &&
-                com.princeniithompson.rapcha.data.DictationEndedReason.fromMessage(err) ==
-                com.princeniithompson.rapcha.data.DictationEndedReason.MISSING_API_KEY
             when {
                 isMicError -> DictationAlerts.microphoneFailed(this)
                 isKeyFailure -> DictationAlerts.apiKeyInvalid(this)
@@ -789,20 +839,24 @@ class FloatingBubbleService : Service() {
     }
 
     private fun performInjectionAndClose(textOverride: String? = null) {
-        val textToInject = textOverride?.trim().takeUnless { it.isNullOrEmpty() }
+        val rawTranscript = textOverride?.trim().takeUnless { it.isNullOrEmpty() }
             ?: sessionManager.getFullTranscriptText()
         if (sessionManager.isRecording) {
             stopVoiceTyping()
         }
 
-        if (textToInject.isBlank()) {
-            if (sessionManager.sessionBytesSent > 32_000L) {
+        if (rawTranscript.isBlank()) {
+            if (sessionManager.sessionBytesSent > 32_000L || sessionManager.localBackupBytes > 32_000L) {
                 DictationAlerts.finalTextLost(this)
             }
             sessionLimitAutoFinish = false
             resetAndCollapse()
             return
         }
+
+        com.princeniithompson.rapcha.data.CustomVocabularyRepository.init(this)
+        val textToInject = com.princeniithompson.rapcha.data.CustomVocabularyRepository
+            .expandShortcutsInTranscript(rawTranscript)
 
         val spokenSeconds = overlayWindowManager.overlayElapsedSeconds.value
         // Injection verifies off the main thread. Collapse only after it returns.
@@ -814,7 +868,14 @@ class FloatingBubbleService : Service() {
                 if (placed !is RapchaTextInserter.InsertionResult.Failed) {
                     runCatching {
                         com.princeniithompson.rapcha.data.DictationStats.record(this@FloatingBubbleService, textToInject, spokenSeconds)
+                        com.princeniithompson.rapcha.data.RecentDictations.load(this@FloatingBubbleService)
                         com.princeniithompson.rapcha.data.RecentDictations.add(textToInject)
+                    }
+                    // Update local manual-dictionary usage timestamps only (zero network calls)
+                    serviceScope.launch(Dispatchers.Default) {
+                        runCatching {
+                            com.princeniithompson.rapcha.data.CustomVocabularyRepository.recordUsageFromTranscript(rawTranscript)
+                        }
                     }
                 }
                 if (sessionLimitAutoFinish) {
@@ -844,6 +905,7 @@ class FloatingBubbleService : Service() {
     }
 
     private fun resetAndCollapse() {
+        RapchaAccessibilityService.instance?.disarmInputConnectionKeepAlive()
         overlayWindowManager.overlayPendingFinalizing.value = false
         overlayWindowManager.overlayRecording.value = false
         pendingCompletionTimeoutJob?.cancel()
@@ -858,8 +920,11 @@ class FloatingBubbleService : Service() {
 
     fun onKeyboardVisibilityChanged(isVisible: Boolean) {
         if (!componentsReady()) return
-        if (isVisible && watchdogBackedOff && screenInteractive) {
-            startWatchdogs()
+        if (isVisible) {
+            ApiConfig.prewarmGeminiConnection()
+            if (watchdogBackedOff && screenInteractive) {
+                startWatchdogs()
+            }
         }
         overlayWindowManager.onKeyboardVisibilityChanged(isVisible, isBubbleSessionActive())
     }
@@ -867,12 +932,18 @@ class FloatingBubbleService : Service() {
     fun onFieldFocusChanged(isFocused: Boolean) {
         if (!componentsReady()) return
         if (isFocused) {
+            ApiConfig.prewarmGeminiConnection()
             if (fieldFocusRevealsBubble(FloatingBubbleManager.isKeyboardVisible.value)) {
                 overlayWindowManager.showImmediately()
             }
             return
         }
-        if (keyboardRecheckShouldHide(FloatingBubbleManager.isKeyboardVisible.value, isBubbleSessionActive())) {
+        if (keyboardRecheckShouldHide(
+                FloatingBubbleManager.isKeyboardVisible.value,
+                isBubbleSessionActive(),
+                FloatingBubbleManager.isAlwaysOnScreen.value
+            )
+        ) {
             overlayWindowManager.onKeyboardVisibilityChanged(isVisible = false, isSessionActive = false)
         }
     }
@@ -882,7 +953,12 @@ class FloatingBubbleService : Service() {
      */
     fun onKeyboardWatch(imeVisible: Boolean) {
         if (!componentsReady()) return
-        if (keyboardRecheckShouldHide(imeVisible, isBubbleSessionActive())) {
+        if (keyboardRecheckShouldHide(
+                imeVisible,
+                isBubbleSessionActive(),
+                FloatingBubbleManager.isAlwaysOnScreen.value
+            )
+        ) {
             FloatingBubbleManager.noteBubbleHideSignal()
             overlayWindowManager.onKeyboardVisibilityChanged(isVisible = false, isSessionActive = false)
         }

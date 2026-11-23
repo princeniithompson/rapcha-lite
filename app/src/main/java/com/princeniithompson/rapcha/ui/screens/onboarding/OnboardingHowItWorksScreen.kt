@@ -99,13 +99,13 @@ fun OnboardingHowItWorksScreen(
 
             // Subtitle
             Text(
-                text = "Use Rapcha in any app with\nthe Lifesaver Bubble",
-                fontSize = 19.sp,
+                text = "Tap the Lifesaver Bubble to dictate,\nor hold and drag over any text to reply",
+                fontSize = 18.sp,
                 fontWeight = FontWeight.Medium,
-                lineHeight = 27.sp,
+                lineHeight = 26.sp,
                 color = OnboardingMutedText,
                 textAlign = TextAlign.Center,
-                modifier = Modifier.padding(horizontal = 16.dp)
+                modifier = Modifier.padding(horizontal = 12.dp)
             )
 
             // Center area with Lifesaver and Radiating Sprinkle Ray Animation

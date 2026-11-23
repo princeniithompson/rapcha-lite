@@ -62,7 +62,9 @@ fun FloatingTranscriptSection(
     scrollState: ScrollState,
     modifier: Modifier = Modifier
 ) {
-    val formattedText = FloatingTranscriptFormatter.livePreviewText(transcriptText)
+    // Keep earlier words intact instead of slicing off the front, so visible lines stay locked
+    // horizontally and roll purely upwards like movie end credits as new lines form.
+    val formattedText = FloatingTranscriptFormatter.formatTranscriptForDisplay(transcriptText)
 
     FloatingTranscriptBox(
         transcriptText = formattedText,

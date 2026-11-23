@@ -31,18 +31,18 @@ fun FloatingAuroraGlowSection(
     glowStyleId: String,
     state: FloatingDictationPopupState,
     isRecording: Boolean,
-    cornerRadius: Dp = 24.dp,
-    notchRadius: Dp = 25.5.dp,
-    notchCenterOffsetX: Dp = 28.dp,
-    notchCenterOffsetY: Dp = 2.dp,
-    filletRadius: Dp = 8.dp,
+    cornerRadius: Dp = FloatingNotchedDimensions.CornerRadius,
+    notchRadius: Dp = FloatingNotchedDimensions.NotchRadius,
+    notchCenterOffsetX: Dp = FloatingNotchedDimensions.NotchCenterOffsetX,
+    notchCenterOffsetY: Dp = FloatingNotchedDimensions.NotchCenterOffsetY,
+    filletRadius: Dp = FloatingNotchedDimensions.FilletRadius,
     modifier: Modifier = Modifier,
     content: @Composable BoxScope.() -> Unit
 ) {
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .padding(top = 22.dp)
+            .padding(top = 19.dp)
             .clip(notchedShape) // Strict clipping before draw prevents any glow/aurora from leaking outside
             .drawWithCache {
                 val path = createNotchedPath(
@@ -56,16 +56,22 @@ fun FloatingAuroraGlowSection(
                 )
                 val cx = size.width - notchCenterOffsetX.toPx()
                 val cy = notchCenterOffsetY.toPx()
-                val notchBloomYOffsetPx = 12.dp.toPx()
-                val notchBloomRadiusPx = 48.dp.toPx()
+                val notchBloomYOffsetPx = 10.dp.toPx()
+                val notchBloomRadiusPx = 42.dp.toPx()
                 val glassBrush = Brush.verticalGradient(
                     colors = listOf(
-                        Color(0x800A1513),
-                        Color(0x94060F0E)
+                        Color(0xAD081210),
+                        Color(0xC4050D0B)
+                    )
+                )
+                val topSheenBrush = Brush.verticalGradient(
+                    colorStops = arrayOf(
+                        0.0f to Color(0x16FFFFFF),
+                        0.38f to Color.Transparent
                     )
                 )
                 val borderStroke = Stroke(
-                    width = 1.35.dp.toPx(),
+                    width = 1.2.dp.toPx(),
                     cap = StrokeCap.Round,
                     join = StrokeJoin.Round
                 )
@@ -87,13 +93,14 @@ fun FloatingAuroraGlowSection(
                         waitingLoopProgress = state.waitingLoopProgress,
                         lowPower = state.lowPower,
                         glassBrush = glassBrush,
+                        topSheenBrush = topSheenBrush,
                         borderStroke = borderStroke,
                         notchBloomYOffsetPx = notchBloomYOffsetPx,
                         notchBloomRadiusPx = notchBloomRadiusPx
                     )
                 }
             }
-            .padding(top = 16.dp, bottom = 12.dp, start = 16.dp, end = 16.dp),
+            .padding(top = 10.dp, bottom = 10.dp, start = 14.dp, end = 14.dp),
         content = content
     )
 }

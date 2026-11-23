@@ -7,18 +7,20 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -27,8 +29,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 /**
- * Left-aligned text input area with auto-scrolling, high contrast shadows,
- * placeholder state ("Type your message..."), and blinking cursor.
+ * Fixed 2-line (`38.dp`) live transcript viewport that rolls smoothly upwards like movie end
+ * credits whenever speech wraps onto a new line.
+ *
+ * Locking the viewport height keeps the bubble rock-steady from 0 words to long dictations and
+ * avoids repeated Android WindowManager relayouts on low-end devices.
  */
 @Composable
 fun FloatingTranscriptBox(
@@ -41,9 +46,10 @@ fun FloatingTranscriptBox(
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .heightIn(min = 38.dp, max = 110.dp)
-            .padding(end = 40.dp)
-            .verticalScroll(scrollState)
+            .height(38.dp) // Exactly 2 crisp lines at 19.sp lineHeight
+            .padding(end = 42.dp) // Clears the docked top-right lifebuoy notch cleanly
+            .verticalScroll(scrollState),
+        contentAlignment = Alignment.TopStart
     ) {
         if (transcriptText.isBlank()) {
             Row(
@@ -53,57 +59,48 @@ fun FloatingTranscriptBox(
                 Box(
                     modifier = Modifier
                         .width(2.dp)
-                        .height(18.dp)
+                        .height(16.dp)
                         .graphicsLayer { alpha = cursorAlphaProvider() }
+                        .clip(CircleShape)
                         .background(palette.primaryVibrant)
                 )
-                Spacer(modifier = Modifier.width(6.dp))
+                Spacer(modifier = Modifier.width(7.dp))
                 Text(
-                    text = "Type your message...",
+                    text = "Listening — speak now...",
                     style = TextStyle(
-                        color = Color(0xB3CBD5E1),
-                        fontSize = 15.sp,
+                        color = Color(0xA6E2E8F0),
+                        fontSize = 14.sp,
+                        lineHeight = 19.sp,
                         fontFamily = FontFamily.SansSerif,
                         fontWeight = FontWeight.Normal,
+                        platformStyle = PlatformTextStyle(includeFontPadding = false),
                         shadow = Shadow(
-                            color = Color(0xCC000000),
+                            color = Color(0xB3000000),
                             blurRadius = 4f
                         )
                     ),
-                    maxLines = 2,
+                    maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
             }
         } else {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.Top
-            ) {
-                Text(
-                    text = transcriptText,
-                    style = TextStyle(
-                        color = Color(0xFFFFFFFF),
-                        fontSize = 15.sp,
-                        fontFamily = FontFamily.SansSerif,
-                        fontWeight = FontWeight.Normal,
-                        lineHeight = 21.sp,
-                        shadow = Shadow(
-                            color = Color(0xE6000000),
-                            offset = Offset(0f, 1f),
-                            blurRadius = 6f
-                        )
-                    ),
-                    modifier = Modifier.weight(1f, fill = false)
-                )
-                Spacer(modifier = Modifier.width(4.dp))
-                Box(
-                    modifier = Modifier
-                        .width(2.dp)
-                        .height(18.dp)
-                        .graphicsLayer { alpha = cursorAlphaProvider() }
-                        .background(palette.primaryVibrant)
-                )
-            }
+            Text(
+                text = transcriptText,
+                style = TextStyle(
+                    color = Color(0xFFFFFFFF),
+                    fontSize = 14.sp,
+                    fontFamily = FontFamily.SansSerif,
+                    fontWeight = FontWeight.Normal,
+                    lineHeight = 19.sp,
+                    platformStyle = PlatformTextStyle(includeFontPadding = false),
+                    shadow = Shadow(
+                        color = Color(0xCC000000),
+                        offset = Offset(0f, 1f),
+                        blurRadius = 5f
+                    )
+                ),
+                modifier = Modifier.fillMaxWidth()
+            )
         }
     }
 }

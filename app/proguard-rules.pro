@@ -38,6 +38,7 @@
 -keep class com.princeniithompson.rapcha.service.FloatingBubbleService { <init>(); }
 -keep class com.princeniithompson.rapcha.service.BubbleRecoveryJobService { <init>(); }
 -keep class com.princeniithompson.rapcha.service.BubbleBootReceiver { <init>(); }
+-keep class com.princeniithompson.rapcha.service.VocabularyNotificationReceiver { <init>(); }
 
 # Enums are persisted by name (valueOf) in the diagnostics JSONL and prefs.
 -keepclassmembers enum com.princeniithompson.rapcha.** {

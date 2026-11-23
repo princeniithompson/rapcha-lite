@@ -16,7 +16,9 @@ fun FloatingButtonRowSection(
     onPolishClick: () -> Unit,
     onCompleteClick: () -> Unit,
     modifier: Modifier = Modifier,
-    showPolish: Boolean = false
+    showPolish: Boolean = false,
+    elapsedSeconds: Int = 0,
+    isNetworkProblem: Boolean = false
 ) {
     FloatingActionRow(
         isFinalizing = state.isFinalizing,
@@ -31,6 +33,9 @@ fun FloatingButtonRowSection(
             }
         },
         modifier = modifier,
-        showPolish = showPolish
+        showPolish = showPolish,
+        elapsedSeconds = elapsedSeconds,
+        isNetworkProblem = isNetworkProblem,
+        blinkAlphaProvider = state.cursorAlphaProvider
     )
 }

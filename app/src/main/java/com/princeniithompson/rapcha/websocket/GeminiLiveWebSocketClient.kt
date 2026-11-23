@@ -67,9 +67,10 @@ class GeminiLiveWebSocketClient(
         private const val SLOW_WS_HANDSHAKE_MS = 3_000L
 
         /**
-         * The Live setup message. Smart Mode ON adds inputAudioTranscription.mode = "SMART"
-         * (clean punctuation and filler removal on gemini-3.5-transcribe-live). OFF leaves the mode
-         * out, so the server returns the raw verbatim transcript, as v24 did.
+         * The Live setup message for `gemini-3.5-transcribe-live`.
+         * Per Google's official transcribe-live docs, this dedicated STT model does not use
+         * conversational systemInstruction; configuration goes strictly through
+         * `inputAudioTranscription` (`mode = "SMART"` and `customVocabulary` up to 1,000 terms).
          */
         fun buildSetupMessage(model: String, smartMode: Boolean, customVocabulary: List<String>): JSONObject {
             val transcriptionConfig = JSONObject().apply {
@@ -78,25 +79,21 @@ class GeminiLiveWebSocketClient(
                 }
                 if (customVocabulary.isNotEmpty()) {
                     val vocabArray = org.json.JSONArray()
-                    customVocabulary.forEach { term ->
-                        val trimmed = term.trim()
-                        if (trimmed.isNotEmpty()) vocabArray.put(trimmed)
+                    customVocabulary
+                        .asSequence()
+                        .map { it.trim() }
+                        .filter { it.isNotEmpty() }
+                        .distinct()
+                        .take(com.princeniithompson.rapcha.data.CustomVocabularyRepository.MAX_GEMINI_ACTIVE_VOCAB_TERMS)
+                        .forEach { vocabArray.put(it) }
+                    if (vocabArray.length() > 0) {
+                        put("customVocabulary", vocabArray)
                     }
-                    put("customVocabulary", vocabArray)
                 }
-            }
-            val systemPromptText = buildString {
-                append(DICTATION_SYSTEM_PROMPT)
-                append(TranscriptAcceptance.vocabularyClause(customVocabulary))
             }
             val setupJson = JSONObject().apply {
                 put("setup", JSONObject().apply {
                     put("model", model)
-                    put("systemInstruction", JSONObject().apply {
-                        put("parts", org.json.JSONArray().apply {
-                            put(JSONObject().apply { put("text", systemPromptText) })
-                        })
-                    })
                     put("generationConfig", JSONObject().apply {
                         put("responseModalities", org.json.JSONArray().apply { put("TEXT") })
                     })
@@ -139,7 +136,39 @@ class GeminiLiveWebSocketClient(
         const val SESSION_LIMIT_WARNING_MS = DictationSessionClock.WARNING_MS
         const val SESSION_LIMIT_FINALIZE_MS = DictationSessionClock.SINGLE_CONNECTION_HARD_STOP_MS
         const val FINAL_TRANSCRIPT_TIMEOUT_MS = 8_000L
+        /** Legacy baseline timeout kept for reference; live finalize now scales adaptively via [computeLiveFinalizeTimeoutMs]. */
+        const val POST_COMMIT_FALLBACK_TIMEOUT_MS = 5_500L
+        /** Fast-fail timeout when a local backup exists and Live never emitted any preview words. */
+        const val STALLED_LIVE_FALLBACK_TIMEOUT_MS = 2_500L
+        /** Timeout for Raw mode (no SMART rewrite pass) when a local backup is ready. */
+        const val RAW_LIVE_FALLBACK_TIMEOUT_MS = 4_000L
+        /** Patient rescue-split threshold so slow mobile data does not spawn extra WebSockets prematurely. */
+        const val SLOW_NETWORK_RESCUE_GAP_MS = 12_000L
         const val GO_AWAY_FINALIZE_THRESHOLD_MS = 45_000L
+
+        /**
+         * Computes how long to wait for Gemini Live's `inputTranscription` after `activityEnd`
+         * before falling back to batch `gemini-3.5-transcribe`:
+         * - No local backup -> full 8s wait (nothing to fall back to).
+         * - Zero live preview received -> fast-fail at 2.5s (likely a black-holed/stalled socket).
+         * - Healthy live stream -> scale with utterance length so longer SMART polishes finish
+         *   cleanly over the open WebSocket instead of timing out prematurely and re-uploading audio.
+         */
+        fun computeLiveFinalizeTimeoutMs(
+            recordingSeconds: Int,
+            smartMode: Boolean,
+            hasLivePreview: Boolean,
+            hasLocalBackup: Boolean
+        ): Long {
+            if (!hasLocalBackup) return FINAL_TRANSCRIPT_TIMEOUT_MS
+            if (!hasLivePreview) return STALLED_LIVE_FALLBACK_TIMEOUT_MS
+            if (!smartMode) return RAW_LIVE_FALLBACK_TIMEOUT_MS
+            return when {
+                recordingSeconds <= 15 -> 5_500L
+                recordingSeconds <= 45 -> 7_000L
+                else -> 8_500L
+            }
+        }
 
         // Single-connection enforcement and instance tracking
         private val activeSocketCount = AtomicInteger(0)
@@ -230,8 +259,20 @@ class GeminiLiveWebSocketClient(
     val activeSessionExists: Boolean
         get() = webSocket != null
 
+    /** True when the Live socket is open, set up, and ready to accept activityEnd immediately. */
+    val isLiveStreamHealthyForFinalize: Boolean
+        get() = webSocket != null &&
+            isSetupComplete.get() &&
+            !isExplicitlyClosed.get() &&
+            !waitingForNetwork &&
+            !isReconnecting
+
+    /** True once Gemini Live has emitted at least one interim preview or committed piece in this session. */
+    val hasReceivedLivePreview: Boolean
+        get() = lastInterimText.isNotBlank() || committedPieces > 0
+
     val interimPreviewMonitor = InterimPreviewMonitor()
-    private val planner = DictationPiecePlanner()
+    private val planner = DictationPiecePlanner(rescueGapMs = SLOW_NETWORK_RESCUE_GAP_MS)
 
     /** Tests advance this so a rescue split does not wait on the wall clock. */
     @Volatile
@@ -268,6 +309,8 @@ class GeminiLiveWebSocketClient(
     /** v25: light adaptive gain on the transmitted copy of the audio only. */
     private val speechGain = com.princeniithompson.rapcha.audio.SpeechGain()
     @Volatile var endpointTimedOut: Boolean = false
+        private set
+    @Volatile var finalSettledFromServer: Boolean = false
         private set
 
     /**
@@ -887,7 +930,7 @@ class GeminiLiveWebSocketClient(
      * Sends activityEnd and suspends until the authoritative transcript arrives.
      * If the server does not answer in time, the last interim preview is returned.
      */
-    suspend fun endActivityAndAwaitFinal(): String {
+    suspend fun endActivityAndAwaitFinal(timeoutMs: Long = FINAL_TRANSCRIPT_TIMEOUT_MS): String {
         if (splitting.get()) {
             suspendCancellableCoroutine<Unit> { cont ->
                 pendingAfterSplit = {
@@ -916,7 +959,7 @@ class GeminiLiveWebSocketClient(
             }
             val timeout = Runnable { settleEndpoint(lastInterimText, timedOut = true) }
             endpointTimeoutRunnable = timeout
-            mainHandler.postDelayed(timeout, FINAL_TRANSCRIPT_TIMEOUT_MS)
+            mainHandler.postDelayed(timeout, timeoutMs.coerceAtLeast(1_000L))
         }
     }
 
@@ -1138,6 +1181,7 @@ class GeminiLiveWebSocketClient(
         pieceTimeout = null
         cancelCompanionWait()
         endpointTimedOut = false
+        finalSettledFromServer = false
     }
 
     private fun handleGoAway(goAway: JSONObject) {
@@ -1150,6 +1194,7 @@ class GeminiLiveWebSocketClient(
         if (!activityEnded.get() && !sessionFinalizing.get()) return
         if (!endpointSettled.compareAndSet(false, true)) return
         endpointTimedOut = timedOut
+        finalSettledFromServer = !timedOut && text.isNotBlank()
         interimPreviewMonitor.onFinalTranscript(clock())
         endpointTimeoutRunnable?.let { mainHandler.removeCallbacks(it) }
         endpointTimeoutRunnable = null
@@ -1163,19 +1208,28 @@ class GeminiLiveWebSocketClient(
             audio.samples
         )
         noteSilenceDrop(raw, piece, audio.rmsMean, audio.rmsMax)
-        if (piece.isNotEmpty()) {
-            committedText = TranscriptSeam.append(committedText, piece)
-            committedPieces += 1
-            lastInterimText = ""
-            notifyFinalizedTranscription(piece)
+        val resultText = if (!timedOut) {
+            if (piece.isNotEmpty()) {
+                committedText = TranscriptSeam.append(committedText, piece)
+                committedPieces += 1
+                lastInterimText = ""
+                notifyFinalizedTranscription(piece)
+            }
+            committedText
+        } else {
+            // Do NOT emit onFinalizedTranscription on a timeout or disconnect: this text is
+            // unfinalized raw interim, not a server-committed piece. Returning it via the
+            // continuation keeps it available as an emergency fallback without polluting
+            // finalizedTranscript before batch fallback runs.
+            TranscriptSeam.append(committedText, piece)
         }
-        resolvedEndpointText = committedText
+        resolvedEndpointText = resultText
         if (timedOut && piece.isEmpty() && committedText.isEmpty()) {
             Log.i(TAG, "Session final timed out with no transcript")
         }
         val cont = endpointContinuation.getAndSet(null)
         if (cont != null && cont.isActive) {
-            cont.resume(committedText)
+            cont.resume(resultText)
         }
     }
 

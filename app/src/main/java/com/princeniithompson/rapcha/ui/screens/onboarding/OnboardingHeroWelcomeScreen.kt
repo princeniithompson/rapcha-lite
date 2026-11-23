@@ -1,8 +1,6 @@
 package com.princeniithompson.rapcha.ui.screens.onboarding
 
-import android.graphics.Paint
-import android.graphics.Path as AndroidPath
-import android.graphics.Typeface
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
@@ -10,8 +8,12 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -31,33 +33,39 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.Reply
+import androidx.compose.material.icons.rounded.AutoAwesome
+import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithCache
-import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.graphics.nativeCanvas
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
@@ -65,22 +73,45 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.princeniithompson.rapcha.R
 import com.princeniithompson.rapcha.ui.theme.EditorialSerifFontFamily
+import com.princeniithompson.rapcha.ui.theme.MyApplicationTheme
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.sin
 
 /**
- * Page 1 Hero Welcome Screen:
- * Low-overhead pure Compose animated ambient backdrop in Rapcha's lifebuoy red, white, and ash
- * palette + curved scrolling sentence arc over a pulsing voice waveform capsule.
- * Animation states are read exclusively in draw/graphicsLayer phases so low-end devices
- * (e.g., Samsung Galaxy A15 / 3-4 GB RAM) never recompose or relayout per frame.
+ * Page 1 Hero Welcome Screen — Rapcha's original "Lifesaver Acoustic Beacon":
+ *
+ * Uses Rapcha's live Material You Dynamic Dark color scheme so the deep atmospheric studio
+ * backdrop, radial aura, sonar ripples, showcase card, and CTA harmonize seamlessly with the
+ * user's wallpaper and transition naturally into the rest of onboarding — while keeping the
+ * red-and-white Lifesaver Ring popping cleanly at center stage.
+ *
+ * Low-end device performance (e.g., Infinix Hot 11 / Helio G70):
+ * - Zero Modifier.blur(), zero AGSL shaders, zero per-frame allocations.
+ * - All continuous motion is read exclusively in drawWithCache / graphicsLayer phases.
+ * - Animations pause automatically when the lifecycle is not RESUMED.
  */
 @Composable
 fun OnboardingHeroWelcomeScreen(
     onGetStarted: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    MyApplicationTheme(darkTheme = true, dynamicColor = true) {
+        OnboardingHeroWelcomeContent(
+            onGetStarted = onGetStarted,
+            modifier = modifier
+        )
+    }
+}
+
+@Composable
+private fun OnboardingHeroWelcomeContent(
+    onGetStarted: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val colorScheme = MaterialTheme.colorScheme
     val lifecycleOwner = LocalLifecycleOwner.current
     var isResumed by remember(lifecycleOwner) {
         mutableStateOf(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
@@ -93,72 +124,72 @@ fun OnboardingHeroWelcomeScreen(
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    var ambientDriftProvider: () -> Float = { 0f }
-    var wavePhaseProvider: () -> Float = { 0f }
-    var marqueeCycleProvider: () -> Float = { 0f }
-    var pillPulseProvider: () -> Float = { 1f }
+    var ripplePhaseProvider: () -> Float = { 0f }
+    var ringFloatProvider: () -> Float = { 0f }
+    var ringBreathProvider: () -> Float = { 1f }
 
     if (isResumed) {
-        val infiniteTransition = rememberInfiniteTransition(label = "hero_welcome_anim")
+        val infiniteTransition = rememberInfiniteTransition(label = "rapcha_beacon_hero")
 
-        val ambientDriftState = infiniteTransition.animateFloat(
+        val ripplePhaseState = infiniteTransition.animateFloat(
+            initialValue = 0f,
+            targetValue = 1f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 3_600, easing = LinearEasing),
+                repeatMode = RepeatMode.Restart
+            ),
+            label = "sonar_ripple"
+        )
+
+        val ringFloatState = infiniteTransition.animateFloat(
             initialValue = 0f,
             targetValue = (2f * PI).toFloat(),
             animationSpec = infiniteRepeatable(
-                animation = tween(durationMillis = 12_000, easing = LinearEasing),
+                animation = tween(durationMillis = 7_200, easing = LinearEasing),
                 repeatMode = RepeatMode.Restart
             ),
-            label = "ambient_drift"
+            label = "ring_float"
         )
 
-        val wavePhaseState = infiniteTransition.animateFloat(
-            initialValue = 0f,
-            targetValue = (2f * PI).toFloat(),
+        val ringBreathState = infiniteTransition.animateFloat(
+            initialValue = 0.97f,
+            targetValue = 1.035f,
             animationSpec = infiniteRepeatable(
-                animation = tween(durationMillis = 1_800, easing = LinearEasing),
-                repeatMode = RepeatMode.Restart
-            ),
-            label = "wave_phase"
-        )
-
-        val marqueeCycleState = infiniteTransition.animateFloat(
-            initialValue = 0f,
-            targetValue = 3f,
-            animationSpec = infiniteRepeatable(
-                animation = tween(durationMillis = 15_000, easing = LinearEasing),
-                repeatMode = RepeatMode.Restart
-            ),
-            label = "marquee_cycle"
-        )
-
-        val pillPulseState = infiniteTransition.animateFloat(
-            initialValue = 0.94f,
-            targetValue = 1.04f,
-            animationSpec = infiniteRepeatable(
-                animation = tween(durationMillis = 1_600, easing = FastOutSlowInEasing),
+                animation = tween(durationMillis = 2_400, easing = FastOutSlowInEasing),
                 repeatMode = RepeatMode.Reverse
             ),
-            label = "pill_pulse"
+            label = "ring_breath"
         )
 
-        ambientDriftProvider = { ambientDriftState.value }
-        wavePhaseProvider = { wavePhaseState.value }
-        marqueeCycleProvider = { marqueeCycleState.value }
-        pillPulseProvider = { pillPulseState.value }
+        ripplePhaseProvider = { ripplePhaseState.value }
+        ringFloatProvider = { ringFloatState.value }
+        ringBreathProvider = { ringBreathState.value }
     }
 
-    val marqueeSentences = remember {
-        listOf(
-            "How would you like to set up the file? Here are a few options.",
-            "Tell the team we'll ship the update right after lunch today.",
-            "Turn spoken ideas into clear messages in seconds."
-        )
+    // Cycles cleanly between Rapcha's two signature abilities every 4.2s (zero per-frame work).
+    var showcaseBeat by remember { mutableIntStateOf(0) }
+    LaunchedEffect(isResumed) {
+        if (!isResumed) return@LaunchedEffect
+        while (isActive) {
+            delay(4_200L)
+            showcaseBeat = (showcaseBeat + 1) % 2
+        }
     }
+
+    val bgLowest = colorScheme.surfaceContainerLowest
+    val bgBase = colorScheme.background
+    val bgLow = colorScheme.surfaceContainerLow
+    val bgContainer = colorScheme.surfaceContainer
+    val primaryGlow = colorScheme.primary
+    val primaryContainerGlow = colorScheme.primaryContainer
+    val onBg = colorScheme.onBackground
+    val onBgMuted = colorScheme.onSurfaceVariant
+    val rimBorder = colorScheme.outlineVariant
 
     BoxWithConstraints(
         modifier = modifier
             .fillMaxSize()
-            .background(Color(0xFF23272E))
+            .background(bgLowest)
             .testTag("onboarding_hero_welcome_screen")
     ) {
         val screenW = maxWidth
@@ -166,111 +197,72 @@ fun OnboardingHeroWelcomeScreen(
         val isTablet = screenW >= 600.dp
         val isCompactHeight = screenH < 640.dp
 
-        val logoSize = when {
-            isTablet -> 38.dp
-            isCompactHeight -> 26.dp
-            else -> 32.dp
-        }
-        val brandFontSize = when {
-            isTablet -> 34.sp
-            isCompactHeight -> 24.sp
-            else -> 28.sp
-        }
-        val headlineFontSize = when {
-            isTablet -> 42.sp
-            isCompactHeight -> 28.sp
-            else -> 34.sp
+        val headlineSize = when {
+            isTablet -> 44.sp
+            isCompactHeight -> 30.sp
+            else -> 36.sp
         }
         val headlineLineHeight = when {
-            isTablet -> 50.sp
-            isCompactHeight -> 34.sp
-            else -> 42.sp
+            isTablet -> 52.sp
+            isCompactHeight -> 36.sp
+            else -> 43.sp
         }
-        val marqueeFontSizeSp = when {
-            isTablet -> 22.sp
-            isCompactHeight -> 15.sp
-            else -> 17.sp
+        val beaconStageSize = when {
+            isTablet -> 290.dp
+            isCompactHeight -> 196.dp
+            else -> 244.dp
         }
-        val pillWidth = when {
-            isTablet -> 160.dp
-            isCompactHeight -> 112.dp
-            else -> 132.dp
-        }
-        val pillHeight = when {
-            isTablet -> 66.dp
-            isCompactHeight -> 48.dp
-            else -> 56.dp
+        val ringVisualSize = when {
+            isTablet -> 118.dp
+            isCompactHeight -> 82.dp
+            else -> 100.dp
         }
         val horizontalPadding = if (isTablet) 40.dp else 24.dp
 
-        // Full-bleed atmospheric animated backdrop matching Rapcha's red, white & ash lifebuoy bubble
+        // Full-bleed Dynamic Dark studio canvas with a single cached radial aura behind the beacon
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .drawWithCache {
-                    val baseGradient = Brush.verticalGradient(
-                        colors = listOf(
-                            Color(0xFF1F2329),
-                            Color(0xFF3A3F47),
-                            Color(0xFF6B1E23),
-                            Color(0xFFA01820),
-                            Color(0xFF321215)
+                    val studioBg = Brush.verticalGradient(
+                        colorStops = arrayOf(
+                            0.00f to bgLowest,
+                            0.38f to bgBase,
+                            0.74f to bgLow,
+                            1.00f to bgLowest
                         )
                     )
-                    val vignetteGradient = Brush.verticalGradient(
+                    val auraRadius = minOf(size.width, size.height) * 0.64f
+                    val auraCenter = Offset(size.width * 0.5f, size.height * 0.45f)
+                    val dynamicAura = Brush.radialGradient(
                         colors = listOf(
-                            Color.Black.copy(alpha = 0.24f),
-                            Color.Transparent,
-                            Color.Transparent,
-                            Color.Black.copy(alpha = 0.34f)
-                        )
+                            primaryGlow.copy(alpha = 0.28f),
+                            primaryContainerGlow.copy(alpha = 0.24f),
+                            Color.Transparent
+                        ),
+                        center = auraCenter,
+                        radius = auraRadius
                     )
-                    val upperGlowColors = listOf(
-                        Color(0xFFF3F4F6).copy(alpha = 0.42f),
-                        Color(0xFFD9232E).copy(alpha = 0.34f),
-                        Color.Transparent
+                    val topRimLight = Brush.radialGradient(
+                        colors = listOf(
+                            primaryGlow.copy(alpha = 0.10f),
+                            Color.Transparent
+                        ),
+                        center = Offset(size.width * 0.5f, 0f),
+                        radius = size.width * 0.85f
                     )
-                    val lowerGlowColors = listOf(
-                        Color(0xFFFFD6D6).copy(alpha = 0.36f),
-                        Color(0xFFB40016).copy(alpha = 0.32f),
-                        Color.Transparent
-                    )
-                    val w = size.width
-                    val h = size.height
-                    val upperRadius = w * 0.72f
-                    val lowerRadius = w * 0.68f
-
                     onDrawBehind {
-                        drawRect(brush = baseGradient)
-
-                        val drift = ambientDriftProvider().toDouble()
-                        val upperX = w * (0.48f + 0.14f * cos(drift).toFloat())
-                        val upperY = h * (0.46f + 0.08f * sin(drift).toFloat())
-                        val upperCenter = Offset(upperX, upperY)
+                        drawRect(brush = studioBg)
                         drawCircle(
-                            brush = Brush.radialGradient(
-                                colors = upperGlowColors,
-                                center = upperCenter,
-                                radius = upperRadius
-                            ),
-                            center = upperCenter,
-                            radius = upperRadius
+                            brush = topRimLight,
+                            center = Offset(size.width * 0.5f, 0f),
+                            radius = size.width * 0.85f
                         )
-
-                        val lowerX = w * (0.38f - 0.12f * sin(drift).toFloat())
-                        val lowerY = h * (0.68f + 0.06f * cos(drift).toFloat())
-                        val lowerCenter = Offset(lowerX, lowerY)
                         drawCircle(
-                            brush = Brush.radialGradient(
-                                colors = lowerGlowColors,
-                                center = lowerCenter,
-                                radius = lowerRadius
-                            ),
-                            center = lowerCenter,
-                            radius = lowerRadius
+                            brush = dynamicAura,
+                            center = auraCenter,
+                            radius = auraRadius
                         )
-
-                        drawRect(brush = vignetteGradient)
                     }
                 }
         )
@@ -284,210 +276,312 @@ fun OnboardingHeroWelcomeScreen(
                 .padding(bottom = if (isCompactHeight) 16.dp else 28.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Spacer(modifier = Modifier.height(if (isCompactHeight) 20.dp else 44.dp))
+            Spacer(modifier = Modifier.height(if (isCompactHeight) 18.dp else 36.dp))
 
-            // Brand Lockup: Lifesaver Ring + Rapcha
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.Center
+            // Brand Pill Lockup
+            Surface(
+                shape = RoundedCornerShape(50),
+                color = bgContainer.copy(alpha = 0.72f),
+                border = BorderStroke(1.dp, rimBorder.copy(alpha = 0.65f))
             ) {
-                Image(
-                    painter = painterResource(id = R.drawable.ic_lifebuoy_ring),
-                    contentDescription = stringResource(id = R.string.app_name),
-                    modifier = Modifier.size(logoSize)
-                )
-                Spacer(modifier = Modifier.width(10.dp))
-                Text(
-                    text = stringResource(id = R.string.app_name),
-                    fontSize = brandFontSize,
-                    fontWeight = FontWeight.Bold,
-                    color = Color.White,
-                    letterSpacing = (-0.3).sp
-                )
+                Row(
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center
+                ) {
+                    Image(
+                        painter = painterResource(id = R.drawable.ic_lifebuoy_ring),
+                        contentDescription = stringResource(id = R.string.app_name),
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = stringResource(id = R.string.app_name),
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = onBg,
+                        letterSpacing = 0.2.sp
+                    )
+                }
             }
 
-            Spacer(modifier = Modifier.height(if (isCompactHeight) 10.dp else 18.dp))
+            Spacer(modifier = Modifier.height(if (isCompactHeight) 14.dp else 22.dp))
 
-            // Hero Headline: "4x faster than typing"
+            // Editorial Serif Headline
             Text(
-                text = "4x faster than typing",
+                text = "Speak naturally.\nWrite effortlessly.",
                 fontFamily = EditorialSerifFontFamily,
-                fontSize = headlineFontSize,
+                fontSize = headlineSize,
                 lineHeight = headlineLineHeight,
                 fontWeight = FontWeight.Normal,
-                color = Color.White.copy(alpha = 0.96f),
+                color = onBg,
                 textAlign = TextAlign.Center,
-                maxLines = 2,
                 modifier = Modifier
                     .widthIn(max = 560.dp)
-                    .padding(horizontal = 8.dp)
+                    .padding(horizontal = 4.dp)
             )
 
-            // Centerpiece: Curved Arc Marquee + Pulsing Voice Pill
-            val density = LocalDensity.current
-            val marqueePx = with(density) { marqueeFontSizeSp.toPx() }
-            val shadowVOffsetPx = with(density) { 1.5.dp.toPx() }
-            val boldTypeface = remember { Typeface.create(Typeface.DEFAULT, Typeface.BOLD) }
-            val marqueeTextPaint = remember(marqueePx, boldTypeface) {
-                Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                    color = android.graphics.Color.WHITE
-                    textSize = marqueePx
-                    typeface = boldTypeface
-                }
-            }
-            val marqueeShadowPaint = remember(marqueePx, boldTypeface) {
-                Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                    color = android.graphics.Color.BLACK
-                    textSize = marqueePx
-                    typeface = boldTypeface
-                }
-            }
-            val sentenceWidths = remember(marqueeSentences, marqueeTextPaint) {
-                FloatArray(marqueeSentences.size) { idx ->
-                    marqueeTextPaint.measureText(marqueeSentences[idx])
-                }
-            }
+            Spacer(modifier = Modifier.height(if (isCompactHeight) 6.dp else 10.dp))
 
+            Text(
+                text = "Voice typing & instant replies in any app",
+                fontSize = if (isCompactHeight) 14.sp else 15.sp,
+                color = onBgMuted,
+                textAlign = TextAlign.Center
+            )
+
+            // Centerpiece: Lifesaver Acoustic Beacon (concentric sonar ripples + precision ticks + floating ring)
             Box(
                 modifier = Modifier
                     .weight(1f)
-                    .fillMaxWidth()
-                    .widthIn(max = 680.dp),
+                    .fillMaxWidth(),
                 contentAlignment = Alignment.Center
             ) {
-                // Curved scrolling sentence path with cached Path & Paints (zero per-frame allocations/blurs)
                 Box(
                     modifier = Modifier
-                        .fillMaxSize()
-                        .drawWithCache {
-                            val w = size.width
-                            val h = size.height
-                            val centerY = h * 0.44f
-                            val arcHeight = minOf(w * 0.20f, h * 0.24f)
-                            val cachedArcPath = AndroidPath().apply {
-                                moveTo(-w * 0.35f, centerY + arcHeight)
-                                quadTo(
-                                    w * 0.50f,
-                                    centerY - arcHeight,
-                                    w * 1.35f,
-                                    centerY + arcHeight
-                                )
-                            }
-                            val pathLengthApprox = w * 1.78f
-
-                            onDrawBehind {
-                                val cycle = marqueeCycleProvider()
-                                val activeIndex = cycle.toInt().coerceIn(0, marqueeSentences.lastIndex)
-                                val localProgress = cycle - activeIndex
-                                val sentence = marqueeSentences[activeIndex]
-                                val textWidth = sentenceWidths[activeIndex]
-
-                                val alphaFade = when {
-                                    localProgress < 0.12f -> localProgress / 0.12f
-                                    localProgress > 0.88f -> (1f - localProgress) / 0.12f
-                                    else -> 1f
-                                }.coerceIn(0f, 1f)
-
-                                val startOffset = pathLengthApprox * 0.72f -
-                                    (localProgress * (pathLengthApprox * 0.48f + textWidth * 0.55f))
-
-                                marqueeShadowPaint.alpha = (alphaFade * 88f).toInt().coerceIn(0, 255)
-                                marqueeTextPaint.alpha = (alphaFade * 245f).toInt().coerceIn(0, 255)
-
-                                val nativeCanvas = drawContext.canvas.nativeCanvas
-                                nativeCanvas.drawTextOnPath(
-                                    sentence,
-                                    cachedArcPath,
-                                    startOffset,
-                                    shadowVOffsetPx,
-                                    marqueeShadowPaint
-                                )
-                                nativeCanvas.drawTextOnPath(
-                                    sentence,
-                                    cachedArcPath,
-                                    startOffset,
-                                    0f,
-                                    marqueeTextPaint
-                                )
-                            }
-                        }
-                )
-
-                // Centered Frosted Voice Waveform Capsule (fixed size + GPU scale via graphicsLayer = 0 relayouts)
-                Surface(
-                    shape = RoundedCornerShape(50),
-                    color = Color.White.copy(alpha = 0.18f),
-                    border = BorderStroke(2.dp, Color.White.copy(alpha = 0.92f)),
-                    modifier = Modifier
-                        .padding(top = if (isCompactHeight) 36.dp else 54.dp)
-                        .size(width = pillWidth, height = pillHeight)
-                        .graphicsLayer {
-                            val scale = pillPulseProvider()
-                            scaleX = scale
-                            scaleY = scale
-                        }
+                        .size(beaconStageSize)
+                        .testTag("hero_lifesaver_beacon"),
+                    contentAlignment = Alignment.Center
                 ) {
-                    Canvas(modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 12.dp)) {
-                        val barCount = 15
-                        val totalW = size.width
-                        val slotW = totalW / barCount
-                        val barW = slotW * 0.44f
-                        val centerY = size.height / 2f
-                        val wavePhase = wavePhaseProvider()
-                        val minBarH = 4.dp.toPx()
-                        val barColor = Color.White.copy(alpha = 0.95f)
-                        val barRadius = CornerRadius(barW / 2f, barW / 2f)
+                    // Single cached Canvas pass for concentric acoustic sonar rings + 16 radial voice ticks
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .drawWithCache {
+                                val cx = size.width * 0.5f
+                                val cy = size.height * 0.5f
+                                val center = Offset(cx, cy)
+                                val minR = size.minDimension * 0.22f
+                                val maxR = size.minDimension * 0.49f
+                                val tickBaseR = size.minDimension * 0.265f
+                                val tickCount = 16
+                                val cosTable = FloatArray(tickCount) { i ->
+                                    cos(i * (2.0 * PI / tickCount)).toFloat()
+                                }
+                                val sinTable = FloatArray(tickCount) { i ->
+                                    sin(i * (2.0 * PI / tickCount)).toFloat()
+                                }
+                                val ringHaloBrush = Brush.radialGradient(
+                                    colors = listOf(
+                                        onBg.copy(alpha = 0.14f),
+                                        primaryGlow.copy(alpha = 0.24f),
+                                        Color.Transparent
+                                    ),
+                                    center = center,
+                                    radius = size.minDimension * 0.36f
+                                )
+                                val rippleStrokePx = 1.6.dp.toPx()
+                                val tickStrokePx = 2.2.dp.toPx()
+                                val minTickLen = 5.dp.toPx()
+                                val maxTickExtra = 10.dp.toPx()
 
-                        for (i in 0 until barCount) {
-                            val normDist = kotlin.math.abs((i - (barCount - 1) / 2f) / ((barCount - 1) / 2f))
-                            val envelope = 1f - (normDist * 0.62f)
-                            val wave = (0.48f + 0.52f * sin((wavePhase + i * 0.65f).toDouble()).toFloat())
-                            val barH = (size.height * 0.80f * envelope * wave).coerceAtLeast(minBarH)
-                            val x = i * slotW + (slotW - barW) / 2f
-                            drawRoundRect(
-                                color = barColor,
-                                topLeft = Offset(x, centerY - barH / 2f),
-                                size = Size(barW, barH),
-                                cornerRadius = barRadius
+                                onDrawBehind {
+                                    // Soft Dynamic Color halo right behind the lifebuoy
+                                    drawCircle(
+                                        brush = ringHaloBrush,
+                                        radius = size.minDimension * 0.36f,
+                                        center = center
+                                    )
+
+                                    // 3 staggered concentric sonar ripples radiating outward
+                                    val phase = ripplePhaseProvider()
+                                    for (i in 0 until 3) {
+                                        val p = (phase + i / 3f) % 1f
+                                        val eased = 1f - (1f - p) * (1f - p)
+                                        val radius = minR + (maxR - minR) * eased
+                                        val alpha = ((1f - p) * 0.48f).coerceIn(0f, 0.48f)
+                                        val rippleColor = if (i % 2 == 0) {
+                                            primaryGlow.copy(alpha = alpha)
+                                        } else {
+                                            onBg.copy(alpha = alpha * 0.85f)
+                                        }
+                                        drawCircle(
+                                            color = rippleColor,
+                                            radius = radius,
+                                            center = center,
+                                            style = Stroke(width = rippleStrokePx)
+                                        )
+                                    }
+
+                                    // 16 subtle radial acoustic ticks dancing smoothly around the Lifesaver Ring
+                                    val waveAngle = ringFloatProvider() * 2f
+                                    for (i in 0 until tickCount) {
+                                        val wave = 0.5f + 0.5f * sin((waveAngle + i * 0.78f).toDouble()).toFloat()
+                                        val len = minTickLen + maxTickExtra * wave
+                                        val c = cosTable[i]
+                                        val s = sinTable[i]
+                                        val start = Offset(cx + tickBaseR * c, cy + tickBaseR * s)
+                                        val end = Offset(cx + (tickBaseR + len) * c, cy + (tickBaseR + len) * s)
+                                        val tickColor = if (i % 4 == 0) {
+                                            primaryGlow.copy(alpha = 0.40f + 0.48f * wave)
+                                        } else {
+                                            onBg.copy(alpha = 0.22f + 0.45f * wave)
+                                        }
+                                        drawLine(
+                                            color = tickColor,
+                                            start = start,
+                                            end = end,
+                                            strokeWidth = tickStrokePx,
+                                            cap = StrokeCap.Round
+                                        )
+                                    }
+                                }
+                            }
+                    )
+
+                    // Floating Lifesaver Ring Emblem (GPU transform only = 0 recompositions)
+                    Surface(
+                        shape = CircleShape,
+                        color = bgContainer,
+                        border = BorderStroke(1.5.dp, primaryGlow.copy(alpha = 0.36f)),
+                        modifier = Modifier
+                            .size(ringVisualSize + 18.dp)
+                            .graphicsLayer {
+                                val breath = ringBreathProvider()
+                                val floatPhase = ringFloatProvider()
+                                scaleX = breath
+                                scaleY = breath
+                                rotationZ = sin(floatPhase.toDouble()).toFloat() * 9f
+                                translationY = cos(floatPhase.toDouble()).toFloat() * 4.dp.toPx()
+                            }
+                    ) {
+                        Box(
+                            modifier = Modifier.fillMaxSize(),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Image(
+                                painter = painterResource(id = R.drawable.ic_lifebuoy_ring),
+                                contentDescription = "Rapcha Lifesaver Ring",
+                                modifier = Modifier.size(ringVisualSize)
                             )
                         }
                     }
                 }
             }
 
-            // Minimal Page Indicator Dots
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.padding(bottom = if (isCompactHeight) 14.dp else 22.dp)
+            // Dual-Superpower Glass Showcase Card (Voice Smart Polish <-> Hold & Highlight Reply)
+            Surface(
+                shape = RoundedCornerShape(22.dp),
+                color = bgContainer.copy(alpha = 0.78f),
+                border = BorderStroke(1.dp, rimBorder.copy(alpha = 0.65f)),
+                modifier = Modifier
+                    .widthIn(max = 460.dp)
+                    .fillMaxWidth()
+                    .padding(bottom = if (isCompactHeight) 14.dp else 22.dp)
+                    .testTag("hero_feature_showcase_card")
             ) {
-                Box(
-                    modifier = Modifier
-                        .size(7.dp)
-                        .clip(CircleShape)
-                        .background(Color.White)
-                )
-                Box(
-                    modifier = Modifier
-                        .size(7.dp)
-                        .clip(CircleShape)
-                        .background(Color.White.copy(alpha = 0.42f))
-                )
-                Box(
-                    modifier = Modifier
-                        .size(7.dp)
-                        .clip(CircleShape)
-                        .background(Color.White.copy(alpha = 0.42f))
-                )
+                AnimatedContent(
+                    targetState = showcaseBeat,
+                    transitionSpec = {
+                        (fadeIn(tween(340)) + slideInVertically(tween(340)) { it / 6 }) togetherWith
+                            (fadeOut(tween(240)) + slideOutVertically(tween(240)) { -it / 6 })
+                    },
+                    label = "hero_showcase_beat"
+                ) { beat ->
+                    if (beat == 0) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 18.dp, vertical = if (isCompactHeight) 12.dp else 15.dp)
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    imageVector = Icons.Rounded.GraphicEq,
+                                    contentDescription = null,
+                                    tint = primaryGlow,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "SMART VOICE",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    letterSpacing = 1.sp,
+                                    color = primaryGlow
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                text = "\"um tell the team we ship after lunch\"",
+                                fontSize = 12.5.sp,
+                                color = onBgMuted.copy(alpha = 0.72f),
+                                textDecoration = TextDecoration.LineThrough,
+                                maxLines = 1
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    imageVector = Icons.Rounded.AutoAwesome,
+                                    contentDescription = null,
+                                    tint = primaryGlow,
+                                    modifier = Modifier.size(15.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "Tell the team we'll ship right after lunch.",
+                                    fontSize = 14.5.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = onBg,
+                                    lineHeight = 20.sp
+                                )
+                            }
+                        }
+                    } else {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 18.dp, vertical = if (isCompactHeight) 12.dp else 15.dp)
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Rounded.Reply,
+                                    contentDescription = null,
+                                    tint = primaryGlow,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "HOLD & HIGHLIGHT",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    letterSpacing = 1.sp,
+                                    color = primaryGlow
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = primaryGlow.copy(alpha = 0.16f),
+                                border = BorderStroke(1.2.dp, primaryGlow.copy(alpha = 0.80f))
+                            ) {
+                                Text(
+                                    text = "Are we still on for the 3 PM sync?",
+                                    fontSize = 12.5.sp,
+                                    color = onBg,
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                                    maxLines = 1
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(5.dp))
+                            Text(
+                                text = "→ \"Yes, 3 PM works great — see you then!\"",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = onBg,
+                                lineHeight = 19.sp
+                            )
+                        }
+                    }
+                }
             }
 
-            // Bottom "Get started" Pill Button
+            // Primary "Get started" CTA — luminous Dynamic Color pill bridging cleanly into Page 2
             Button(
                 onClick = onGetStarted,
-                shape = RoundedCornerShape(14.dp),
+                shape = RoundedCornerShape(16.dp),
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = Color.White,
-                    contentColor = Color(0xFF141218)
+                    containerColor = colorScheme.primary,
+                    contentColor = colorScheme.onPrimary
                 ),
                 modifier = Modifier
                     .widthIn(max = 460.dp)
@@ -499,7 +593,7 @@ fun OnboardingHeroWelcomeScreen(
                     text = "Get started",
                     fontSize = 17.sp,
                     fontWeight = FontWeight.SemiBold,
-                    color = Color(0xFF141218)
+                    color = colorScheme.onPrimary
                 )
             }
         }

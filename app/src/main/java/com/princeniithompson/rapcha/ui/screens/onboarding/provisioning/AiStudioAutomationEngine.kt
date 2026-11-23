@@ -658,6 +658,148 @@ class AiStudioAutomationEngine(private val context: Context) {
             _state.value = _state.value.copy(detectedEmail = found)
             ApiKeyVault.saveGoogleEmail(appContext, found)
         }
+        captureGoogleProfileFromDom(ctrl, found)
+    }
+
+    private suspend fun captureGoogleProfileFromDom(ctrl: FindInPageController, fallbackEmail: String?) {
+        val js = """
+            (function() {
+                try {
+                    var name = '';
+                    var email = '';
+                    var avatar = '';
+                    var emailRe = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/;
+                    var btns = document.querySelectorAll('a[aria-label*="Google Account"], button[aria-label*="Google Account"], [aria-label*="@"]');
+                    for (var i = 0; i < btns.length; i++) {
+                        var label = btns[i].getAttribute('aria-label') || '';
+                        var em = label.match(emailRe);
+                        if (em && !email) email = em[0];
+                        if (label.indexOf('Google Account:') !== -1 && !name) {
+                            var after = label.split('Google Account:')[1] || '';
+                            after = after.replace(emailRe, '').replace(/[()]/g, '').replace(/\s+/g, ' ').trim();
+                            if (after.length >= 2 && after.length <= 64) name = after;
+                        }
+                        var img = btns[i].querySelector('img[src*="googleusercontent.com"], img[src*="ggpht.com"]');
+                        if (img && img.src && !avatar) avatar = img.src;
+                    }
+                    if (!avatar) {
+                        var imgs = document.querySelectorAll('img[src*="lh3.googleusercontent.com"], img[src*="googleusercontent.com/a/"]');
+                        for (var j = 0; j < imgs.length; j++) {
+                            var s = imgs[j].src || '';
+                            if (s.indexOf('https://') === 0) { avatar = s; break; }
+                        }
+                    }
+                    return JSON.stringify({ name: name, email: email, avatar: avatar });
+                } catch (e) {
+                    return '';
+                }
+            })();
+        """.trimIndent()
+        val raw = ctrl.evaluateJavascript(js)
+        val clean = try {
+            org.json.JSONTokener(raw).nextValue()?.toString().orEmpty()
+        } catch (_: Throwable) {
+            ""
+        }
+        if (clean.isBlank()) return
+        try {
+            val obj = org.json.JSONObject(clean)
+            val name = obj.optString("name", "").trim()
+            val email = obj.optString("email", "").trim().ifBlank { fallbackEmail.orEmpty() }
+            val avatar = obj.optString("avatar", "").trim()
+            if (email.isNotBlank() && email != _state.value.detectedEmail) {
+                _state.value = _state.value.copy(detectedEmail = email)
+                ApiKeyVault.saveGoogleEmail(appContext, email)
+            }
+            if (name.isNotBlank() || email.isNotBlank() || avatar.isNotBlank()) {
+                com.princeniithompson.rapcha.data.UserProfileRepository.saveProfileFromWeb(
+                    context = appContext,
+                    displayName = name,
+                    email = email,
+                    avatarUrl = avatar
+                )
+            }
+        } catch (_: Throwable) {
+        }
+    }
+
+    /**
+     * Quietly loads Google AI Studio's Rate Limits page in the background WebView using the user's
+     * existing Google session cookies, captures their real Google profile photo & display name, and
+     * parses ONLY Rapcha's metered models (`Gemini 3.5 Flash Lite` & `Gemini 3.5 Transcribe`) plus
+     * account tier (`Free tier` vs paid tier). Never pops up a browser window.
+     */
+    fun syncProfileAndRateLimitsSilently(onComplete: (String) -> Unit = {}) {
+        if (com.princeniithompson.rapcha.data.UserProfileRepository.profile.value.isSyncing) return
+        val hasCookies = try {
+            val cm = CookieManager.getInstance()
+            cm.hasCookies() && (
+                !cm.getCookie("https://aistudio.google.com").isNullOrBlank() ||
+                    !cm.getCookie("https://accounts.google.com").isNullOrBlank()
+                )
+        } catch (_: Throwable) {
+            false
+        }
+        if (!hasCookies) {
+            onComplete("Sign in with Google once to sync your photo and tier limits")
+            return
+        }
+
+        com.princeniithompson.rapcha.data.UserProfileRepository.setSyncing(true, "Syncing profile & limits...")
+        scope.launch {
+            var resultMsg = "Limits refreshed"
+            try {
+                val wv = withContext(Dispatchers.Main) {
+                    val created = createOrReuseWebView(forceRecovery = false)
+                    created.loadUrl("https://aistudio.google.com/rate-limit")
+                    created
+                }
+                val ctrl = controller
+                if (ctrl == null) {
+                    resultMsg = "Could not start sync"
+                    return@launch
+                }
+
+                waitUntilLoaded(wv)
+                var synced = false
+                for (attempt in 1..14) {
+                    if (!scope.isActive) break
+                    val url = withContext(Dispatchers.Main) { wv.url.orEmpty() }
+                    if (ProvisioningWebMath.isGoogleAuthUrl(url)) {
+                        resultMsg = "Reconnect via Google in Account to sync photo & limits"
+                        break
+                    }
+                    captureGoogleProfileFromDom(ctrl, ApiKeyVault.googleEmailFlow.value)
+                    val bodyRaw = ctrl.evaluateJavascript("(function(){ return (document.body && document.body.innerText) ? document.body.innerText : ''; })();")
+                    val bodyText = try {
+                        org.json.JSONTokener(bodyRaw).nextValue()?.toString().orEmpty()
+                    } catch (_: Throwable) {
+                        ""
+                    }
+                    val parsed = com.princeniithompson.rapcha.data.ApiUsageRepository.parseAiStudioRateLimitText(bodyText)
+                    if (parsed != null && (parsed.modulesLimit != null || parsed.offlineLimit != null)) {
+                        com.princeniithompson.rapcha.data.ApiUsageRepository.applySyncedRateLimits(parsed)
+                        resultMsg = "Synced (${parsed.tierLabel})"
+                        synced = true
+                        break
+                    }
+                    delay(850L)
+                }
+                if (!synced && resultMsg == "Limits refreshed") {
+                    resultMsg = "Profile checked; using current daily limits"
+                }
+            } catch (_: Throwable) {
+                resultMsg = "Sync paused — using local daily counter"
+            } finally {
+                com.princeniithompson.rapcha.data.UserProfileRepository.setSyncing(false, resultMsg)
+                if (_state.value.keyProvisioned || ApiKeyVault.hasVerifiedWorkingKey()) {
+                    tearDownWebView()
+                }
+                withContext(Dispatchers.Main) {
+                    onComplete(resultMsg)
+                }
+            }
+        }
     }
 
     fun ensureBackgroundAutomationRunning() {
@@ -920,7 +1062,7 @@ class AiStudioAutomationEngine(private val context: Context) {
         )
         val onboardingDone = com.princeniithompson.rapcha.data.OnboardingRepository.isOnboardingCompleted.value
         if (onboardingDone && verifyResult.kind == ApiKeyVault.KeyVerifyKind.VALID) {
-            tearDownWebView()
+            syncProfileAndRateLimitsSilently()
         } else {
             parkWebViewInStandby()
         }

@@ -41,9 +41,13 @@ open class RapchaAccessibilityService : AccessibilityService() {
          */
         private const val NO_ACTIVE_PACKAGE = "<no-active-package>"
         const val VERIFICATION_ATTEMPTS = 2
-        const val VERIFY_WAIT_MS = 150L
+        const val VERIFY_WAIT_MS = 50L
         /** Verification may poll, but a slow read must not be treated as a failed insert. */
         const val VERIFY_POLL_BUDGET_MS = 600L
+        private const val IME_KEEP_ALIVE_FIRST_TICK_MS = 1_000L
+        private const val IME_KEEP_ALIVE_INTERVAL_MS = 8_000L
+        private const val IME_KEEP_ALIVE_RETRY_MS = 1_000L
+        private const val IME_KEEP_ALIVE_MAX_TTL_MS = 15L * 60L * 1000L
         const val KEYBOARD_WATCH_MS = KeyboardSettleStateMachine.KEYBOARD_WATCH_MS
         const val EVAL_THROTTLE_MS = 85L
         var instance: RapchaAccessibilityService? = null
@@ -804,6 +808,7 @@ open class RapchaAccessibilityService : AccessibilityService() {
             try { unregisterReceiver(screenReceiver) } catch (_: Exception) {}
             receiversRegistered = false
         }
+        disarmInputConnectionKeepAlive()
     }
 
     override fun onDestroy() {
@@ -811,6 +816,75 @@ open class RapchaAccessibilityService : AccessibilityService() {
         teardownConnectionState(clearEvalWorker = true)
         lastFocusedEditableNode = null
         Log.d(TAG, "RapchaAccessibilityService destroyed")
+    }
+
+    private val imeKeepAliveHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private var imeKeepAliveRunnable: Runnable? = null
+    private var imeKeepAliveDeadlineMs: Long = 0L
+
+    /**
+     * Keeps Android 13+ Accessibility InputMethod's [AccessibilityInputConnection] awake while
+     * the user dictates so P1 `commitText` fires immediately on Complete instead of going stale
+     * and falling back to P3 `ACTION_SET_TEXT`. Purely read-only (never edits or clears fields).
+     */
+    fun armInputConnectionKeepAlive() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        imeKeepAliveHandler.post {
+            disarmInputConnectionKeepAliveOnMain()
+            imeKeepAliveDeadlineMs = android.os.SystemClock.elapsedRealtime() + IME_KEEP_ALIVE_MAX_TTL_MS
+            val tick = object : Runnable {
+                override fun run() {
+                    if (imeKeepAliveRunnable !== this) return
+                    val now = android.os.SystemClock.elapsedRealtime()
+                    if (now >= imeKeepAliveDeadlineMs) {
+                        disarmInputConnectionKeepAliveOnMain()
+                        return
+                    }
+                    val ok = probeInputConnectionKeepAliveOnMain()
+                    val nextDelay = if (ok) IME_KEEP_ALIVE_INTERVAL_MS else IME_KEEP_ALIVE_RETRY_MS
+                    imeKeepAliveHandler.postDelayed(this, nextDelay)
+                }
+            }
+            imeKeepAliveRunnable = tick
+            imeKeepAliveHandler.postDelayed(tick, IME_KEEP_ALIVE_FIRST_TICK_MS)
+        }
+    }
+
+    fun disarmInputConnectionKeepAlive() {
+        imeKeepAliveHandler.post { disarmInputConnectionKeepAliveOnMain() }
+    }
+
+    private fun disarmInputConnectionKeepAliveOnMain() {
+        imeKeepAliveRunnable?.let { imeKeepAliveHandler.removeCallbacks(it) }
+        imeKeepAliveRunnable = null
+        imeKeepAliveDeadlineMs = 0L
+    }
+
+    @RequiresApi(Build.VERSION_CODES.TIRAMISU)
+    private fun probeInputConnectionKeepAliveOnMain(): Boolean {
+        return try {
+            val connection = inputMethod?.currentInputConnection
+            if (connection != null) {
+                // Lightweight read-only probe keeps the IPC input connection warm without mutating text.
+                connection.getSurroundingText(1, 1, 0)
+                true
+            } else {
+                // Gentle focus check only if the previously tracked editable node is still attached.
+                val node = lastFocusedEditableNode
+                if (node != null) {
+                    try {
+                        node.refresh()
+                        if (!node.isFocused && isEditableNode(node)) {
+                            node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+                        }
+                    } catch (_: Throwable) {
+                    }
+                }
+                false
+            }
+        } catch (_: Throwable) {
+            false
+        }
     }
 
     /**
@@ -1535,4 +1609,68 @@ open class RapchaAccessibilityService : AccessibilityService() {
 
         return null
     }
+
+    /**
+     * Single-shot snapshot of visible text nodes in active application window(s) for
+     * Telescope drag-to-select mode. Called once on ACTION_DOWN (never on ACTION_MOVE).
+     *
+     * Allows TYPE_APPLICATION windows (including Rapcha's own Activity screens) while skipping
+     * floating overlays (TYPE_ACCESSIBILITY_OVERLAY, TYPE_SYSTEM) and keyboards (TYPE_INPUT_METHOD).
+     */
+    fun captureVisibleTextNodes(): List<com.princeniithompson.rapcha.service.floating.ScreenTextNode> {
+        val dm = resources.displayMetrics
+        val roots = ArrayList<AccessibilityNodeInfo>(2)
+        try {
+            val currentWindows = try { getWindows() } catch (_: Throwable) { null }
+            if (!currentWindows.isNullOrEmpty()) {
+                // Active/focused application window first, then other visible application windows
+                val ordered = currentWindows
+                    .filter {
+                        try {
+                            com.princeniithompson.rapcha.service.floating.ScreenTextSnapshot
+                                .isAllowedWindowType(it.type)
+                        } catch (_: Throwable) {
+                            false
+                        }
+                    }
+                    .sortedByDescending {
+                        try {
+                            (if (it.isActive) 2 else 0) + (if (it.isFocused) 1 else 0)
+                        } catch (_: Throwable) {
+                            0
+                        }
+                    }
+                for (w in ordered) {
+                    val root = try { w.root } catch (_: Throwable) { null } ?: continue
+                    roots.add(root)
+                    if (roots.size >= 2) break
+                }
+            }
+            if (roots.isEmpty()) {
+                val activeRoot = try { rootInActiveWindow } catch (_: Throwable) { null }
+                if (activeRoot != null) {
+                    val winType = try { activeRoot.window?.type } catch (_: Throwable) { null }
+                    if (winType != null && !com.princeniithompson.rapcha.service.floating.ScreenTextSnapshot.isAllowedWindowType(winType)) {
+                        safeRecycle(activeRoot)
+                    } else {
+                        roots.add(activeRoot)
+                    }
+                }
+            }
+            return com.princeniithompson.rapcha.service.floating.ScreenTextSnapshot.extractFromRoots(
+                roots = roots,
+                ignoredPackage = null,
+                screenWidth = dm.widthPixels,
+                screenHeight = dm.heightPixels
+            )
+        } catch (t: Throwable) {
+            Log.w(TAG, "captureVisibleTextNodes failed cleanly: ${t.javaClass.simpleName}")
+            return emptyList()
+        } finally {
+            for (root in roots) {
+                safeRecycle(root)
+            }
+        }
+    }
 }
+

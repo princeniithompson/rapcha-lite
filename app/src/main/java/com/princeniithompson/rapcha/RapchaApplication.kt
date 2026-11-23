@@ -9,6 +9,8 @@ class RapchaApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         com.princeniithompson.rapcha.core.ApiKeyVault.init(this)
+        com.princeniithompson.rapcha.data.ApiUsageRepository.init(this)
+        com.princeniithompson.rapcha.data.UserProfileRepository.init(this)
         ensureBackgroundInit(this)
         if (com.princeniithompson.rapcha.service.FloatingBubbleManager.isBubbleEnabledSync(this) &&
             com.princeniithompson.rapcha.service.FloatingBubbleService.instance == null &&

@@ -33,10 +33,15 @@ class SmartModeSetupTest {
     }
 
     @Test
-    fun setup_keeps_the_v25_prompt_vocabulary_and_manual_vad() {
+    fun setup_follows_official_transcribe_live_spec_without_system_instruction() {
         val json = GeminiLiveWebSocketClient.buildSetupMessage("models/test", true, listOf("Rapcha"))
+        val setupObj = json.getJSONObject("setup")
         val setup = json.toString()
-        assertEquals("models/test", json.getJSONObject("setup").getString("model"))
+        assertEquals("models/test", setupObj.getString("model"))
+        assertFalse(
+            "gemini-3.5-transcribe-live setup must not send unsupported systemInstruction",
+            setupObj.has("systemInstruction")
+        )
         assertTrue(setup.contains("Rapcha"))
         assertTrue(setup.contains("automaticActivityDetection"))
     }

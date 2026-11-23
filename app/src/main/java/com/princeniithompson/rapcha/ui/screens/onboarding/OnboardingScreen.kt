@@ -105,6 +105,11 @@ fun OnboardingScreen(
     }
 
     DisposableEffect(context) {
+        // Suppress system FloatingBubbleService while onboarding is open so granting Overlay &
+        // Accessibility before interactive practice never spawns an overlapping second bubble.
+        com.princeniithompson.rapcha.service.FloatingBubbleManager.isOnboardingActive = true
+        com.princeniithompson.rapcha.service.FloatingBubbleManager.stopBubbleService(context)
+
         val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
@@ -117,6 +122,7 @@ fun OnboardingScreen(
         }
         runCatching { cm?.registerDefaultNetworkCallback(callback) }
         onDispose {
+            com.princeniithompson.rapcha.service.FloatingBubbleManager.isOnboardingActive = false
             runCatching { cm?.unregisterNetworkCallback(callback) }
         }
     }
@@ -208,13 +214,14 @@ fun OnboardingScreen(
             stage == OnboardingStage.GOOGLE_AUTH_HANDOFF -> stage = OnboardingStage.GOOGLE_SIGN_IN
             stage == OnboardingStage.INTRO -> stage = OnboardingStage.WELCOME_HERO
             stage == OnboardingStage.HOW_IT_WORKS -> stage = OnboardingStage.INTRO
-            stage == OnboardingStage.SANDBOX -> stage = OnboardingStage.HOW_IT_WORKS
-            stage == OnboardingStage.APPS_SHOWCASE -> stage = OnboardingStage.SANDBOX
+            stage == OnboardingStage.APPS_SHOWCASE -> stage = OnboardingStage.HOW_IT_WORKS
             stage == OnboardingStage.OVERLAY_PERMISSION -> stage = OnboardingStage.APPS_SHOWCASE
             stage == OnboardingStage.KEEP_AWAKE -> stage = OnboardingStage.OVERLAY_PERMISSION
             stage == OnboardingStage.ACCESSIBILITY_GUIDE -> stage = OnboardingStage.KEEP_AWAKE
+            stage == OnboardingStage.SANDBOX -> stage = OnboardingStage.ACCESSIBILITY_GUIDE
+            stage == OnboardingStage.TELESCOPE_PRACTICE -> stage = OnboardingStage.SANDBOX
             stage == OnboardingStage.NOTIFICATION_PERMISSION ||
-            stage == OnboardingStage.ALL_SET -> stage = OnboardingStage.ACCESSIBILITY_GUIDE
+            stage == OnboardingStage.ALL_SET -> stage = OnboardingStage.TELESCOPE_PRACTICE
         }
     }
 
@@ -295,13 +302,19 @@ fun OnboardingScreen(
 
                 OnboardingStage.INTRO,
                 OnboardingStage.HOW_IT_WORKS,
-                OnboardingStage.SANDBOX,
                 OnboardingStage.APPS_SHOWCASE,
                 OnboardingStage.OVERLAY_PERMISSION,
                 OnboardingStage.KEEP_AWAKE,
                 OnboardingStage.ACCESSIBILITY_GUIDE,
+                OnboardingStage.SANDBOX,
+                OnboardingStage.TELESCOPE_PRACTICE,
                 OnboardingStage.NOTIFICATION_PERMISSION,
                 OnboardingStage.ALL_SET -> {
+                    val isActivatingKey =
+                        provisioningState.status == ProvisioningStatus.PROVISIONING_BACKGROUND ||
+                            provisioningState.status == ProvisioningStatus.SIGNING_IN ||
+                            (viewModel.hasProvisionedPersonalKey() && !isApiKeyVerified && apiKeyErrorReason.isBlank())
+
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
@@ -316,7 +329,7 @@ fun OnboardingScreen(
                         ) {
                             OnboardingTopBar(
                                 currentSegment = stage.progressIndex,
-                                totalSegments = 8
+                                totalSegments = OnboardingStage.TOTAL_PROGRESS_SEGMENTS
                             )
 
                             when (stage) {
@@ -328,14 +341,7 @@ fun OnboardingScreen(
 
                                 OnboardingStage.HOW_IT_WORKS -> {
                                     OnboardingHowItWorksScreen(
-                                        onNext = { stage = OnboardingStage.SANDBOX }
-                                    )
-                                }
-
-                                OnboardingStage.SANDBOX -> {
-                                    OnboardingSandboxScreen(
-                                        viewModel = viewModel,
-                                        onComplete = { stage = OnboardingStage.APPS_SHOWCASE }
+                                        onNext = { stage = OnboardingStage.APPS_SHOWCASE }
                                     )
                                 }
 
@@ -362,16 +368,28 @@ fun OnboardingScreen(
                                 OnboardingStage.ACCESSIBILITY_GUIDE -> {
                                     OnboardingAccessibilityGuideScreen(
                                         isAccessibilityConnected = isAccessibilityConnected,
-                                        onNext = { stage = OnboardingStage.NOTIFICATION_PERMISSION }
+                                        onNext = { stage = OnboardingStage.SANDBOX }
+                                    )
+                                }
+
+                                OnboardingStage.SANDBOX -> {
+                                    OnboardingSandboxScreen(
+                                        viewModel = viewModel,
+                                        isApiKeyReady = hasVerifiedWorkingKey,
+                                        isActivatingKey = isActivatingKey,
+                                        onComplete = { stage = OnboardingStage.TELESCOPE_PRACTICE }
+                                    )
+                                }
+
+                                OnboardingStage.TELESCOPE_PRACTICE -> {
+                                    OnboardingTelescopePracticeScreen(
+                                        isApiKeyReady = hasVerifiedWorkingKey,
+                                        onComplete = { stage = OnboardingStage.NOTIFICATION_PERMISSION }
                                     )
                                 }
 
                                 OnboardingStage.NOTIFICATION_PERMISSION,
                                 OnboardingStage.ALL_SET -> {
-                                    val isActivatingKey =
-                                        provisioningState.status == ProvisioningStatus.PROVISIONING_BACKGROUND ||
-                                            provisioningState.status == ProvisioningStatus.SIGNING_IN ||
-                                            (viewModel.hasProvisionedPersonalKey() && !isApiKeyVerified && apiKeyErrorReason.isBlank())
                                     OnboardingNotificationScreen(
                                         isApiKeyReady = hasVerifiedWorkingKey,
                                         isActivatingKey = isActivatingKey,
@@ -385,6 +403,7 @@ fun OnboardingScreen(
                                             }
                                         },
                                         onFinish = {
+                                            com.princeniithompson.rapcha.service.FloatingBubbleManager.isOnboardingActive = false
                                             viewModel.completeOnboarding()
                                             if (hasOverlayPermission) {
                                                 viewModel.setBubbleEnabled(true)

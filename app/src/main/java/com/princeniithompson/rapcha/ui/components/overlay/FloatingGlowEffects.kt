@@ -33,6 +33,7 @@ fun DrawScope.drawNotchedOverlayBackground(
     waitingLoopProgress: Float,
     lowPower: Boolean = false,
     glassBrush: Brush? = null,
+    topSheenBrush: Brush? = null,
     borderStroke: Stroke? = null,
     notchBloomYOffsetPx: Float = 12.dp.toPx(),
     notchBloomRadiusPx: Float = 48.dp.toPx()
@@ -68,11 +69,16 @@ fun DrawScope.drawNotchedOverlayBackground(
         drawRect(
             brush = glassBrush ?: Brush.verticalGradient(
                 colors = listOf(
-                    Color(0x800A1513),
-                    Color(0x94060F0E)
+                    Color(0x88091311),
+                    Color(0x9E060E0D)
                 )
             )
         )
+
+        // Layer 3b: Subtle cached top specular glass sheen (zero per-frame allocations)
+        if (topSheenBrush != null) {
+            drawRect(brush = topSheenBrush)
+        }
 
         // Layer 4: Dynamic glowing container visualizer animation
         val glowBrightness = (0.38f + 0.62f * effectiveAmp)

@@ -71,9 +71,11 @@ fun DictionaryScreen(
     onOpenMenu: () -> Unit,
     modifier: Modifier = Modifier,
     draftTerm: String? = null,
-    onDraftConsumed: () -> Unit = {}
+    onDraftConsumed: () -> Unit = {},
+    onOpenVoiceReview: (String?) -> Unit = {}
 ) {
     val vocabularyList by CustomVocabularyRepository.vocabulary.collectAsState()
+    val pendingCandidates by CustomVocabularyRepository.pendingCandidates.collectAsState()
     var searchQuery by remember { mutableStateOf("") }
 
     var showAddDialog by remember { mutableStateOf(false) }
@@ -198,6 +200,64 @@ fun DictionaryScreen(
             )
 
             Spacer(modifier = Modifier.height(16.dp))
+
+            // Pending Voice-First Learning Suggestions Banner
+            val firstPending = pendingCandidates.firstOrNull()
+            if (firstPending != null && searchQuery.isBlank()) {
+                Card(
+                    shape = RoundedCornerShape(20.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f)
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 12.dp)
+                        .testTag("dictionary_pending_candidate_card")
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp)
+                    ) {
+                        Text(
+                            text = firstPending.spokenPrompt,
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            androidx.compose.material3.Button(
+                                onClick = { CustomVocabularyRepository.approveCandidate(firstPending.id) },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("pending_candidate_yes")
+                            ) {
+                                Text("Yes", fontWeight = FontWeight.Bold)
+                            }
+                            androidx.compose.material3.OutlinedButton(
+                                onClick = { CustomVocabularyRepository.rejectCandidate(firstPending.id) },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("pending_candidate_no")
+                            ) {
+                                Text("No", fontWeight = FontWeight.Bold)
+                            }
+                            androidx.compose.material3.FilledTonalButton(
+                                onClick = { onOpenVoiceReview(firstPending.id) },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("pending_candidate_edit")
+                            ) {
+                                Text("Edit", fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+            }
 
             // Soft Limit Warning (> 100 terms)
             if (vocabularyList.size > 100) {
@@ -463,17 +523,20 @@ fun DictionaryScreen(
             modifier = Modifier
                 .align(Alignment.BottomEnd)
                 .padding(end = 24.dp, bottom = 24.dp)
-                .size(56.dp)
+                .size(60.dp)
                 .testTag("add_word_fab"),
             shape = CircleShape,
-            containerColor = Color(0xFF1E1E1E),
-            contentColor = Color.White,
-            elevation = FloatingActionButtonDefaults.elevation(defaultElevation = 6.dp)
+            containerColor = MaterialTheme.colorScheme.primary,
+            contentColor = MaterialTheme.colorScheme.onPrimary,
+            elevation = FloatingActionButtonDefaults.elevation(
+                defaultElevation = 8.dp,
+                pressedElevation = 12.dp
+            )
         ) {
             Icon(
                 imageVector = Icons.Filled.Add,
                 contentDescription = "Add word",
-                modifier = Modifier.size(24.dp)
+                modifier = Modifier.size(28.dp)
             )
         }
     }

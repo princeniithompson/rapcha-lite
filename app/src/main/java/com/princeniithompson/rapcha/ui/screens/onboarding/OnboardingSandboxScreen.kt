@@ -1,9 +1,7 @@
 package com.princeniithompson.rapcha.ui.screens.onboarding
 
 import android.Manifest
-import android.content.Context
 import android.content.pm.PackageManager
-import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.Animatable
@@ -29,7 +27,6 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
@@ -37,14 +34,19 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.SentimentSatisfied
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -59,6 +61,7 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
@@ -68,66 +71,218 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.withStyle
-import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Density
-import androidx.compose.runtime.CompositionLocalProvider
-import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.princeniithompson.rapcha.R
+import com.princeniithompson.rapcha.core.ApiConfig
+import com.princeniithompson.rapcha.service.floating.FloatingDictationSessionManager
 import com.princeniithompson.rapcha.ui.VoiceTypingViewModel
 import com.princeniithompson.rapcha.ui.components.FloatingDictationPopup
 import com.princeniithompson.rapcha.ui.theme.OnboardingBorderStroke
 import com.princeniithompson.rapcha.ui.theme.OnboardingCreamBackground
 import com.princeniithompson.rapcha.ui.theme.OnboardingInkBlack
 import com.princeniithompson.rapcha.ui.theme.OnboardingMutedText
+import com.princeniithompson.rapcha.websocket.GeminiLiveWebSocketClient
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 /**
- * Screens 3, 4, 5, 6, 7: Interactive sandbox using the user's native keyboard (Gboard, Samsung, etc.):
- * 1. "Tap the text box above"
- * 2. User taps text box -> real native software keyboard opens, shaking Lifesaver Bubble appears right above keyboard
- * 3. Tapping bubble requests real Android RECORD_AUDIO permission and expands into the EXACT floating notched container
- *    used across the application (with aurora glow, live transcript, Clean/Optimize AI modes, Cancel, Polish, and Complete buttons)
- * 4. Transcribed / polished text populates the native chat input field -> "Nice, that worked!" with Continue button
+ * Interactive Voice Dictation Practice Sandbox:
+ * - Uses the exact live Original Bubble (Cancel | blinking red timer | Complete; NO legacy Polish pill).
+ * - Uses Rapcha's real Gemini Live engine (`gemini-3.5-transcribe-live`, SMART mode) whenever the
+ *   user's API key is ready.
+ * - If the background API key fetch is still in flight when the user starts talking, seamlessly
+ *   falls back to on-device SpeechRecognizer for this demo run only (and offers Skip) so onboarding
+ *   is never blocked.
  */
 @Composable
 fun OnboardingSandboxScreen(
     @Suppress("UNUSED_PARAMETER") viewModel: VoiceTypingViewModel? = null,
     onComplete: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    isApiKeyReady: Boolean = false,
+    isActivatingKey: Boolean = false
 ) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
     val focusRequester = remember { FocusRequester() }
     val coroutineScope = rememberCoroutineScope()
 
-    var stepStage by remember { mutableIntStateOf(1) } // 1: Tap text box, 2: Tap bubble, 3: Container expanded (recording/polishing), 4: Result
+    // 1: Tap text box, 2: Tap bubble, 3: Original bubble expanded (recording/finalizing), 4: Result
+    var stepStage by remember { mutableIntStateOf(1) }
     var typedText by remember { mutableStateOf("") }
-    var isPolishingInProgress by remember { mutableStateOf(false) }
+    var liveBubbleTranscript by remember { mutableStateOf("") }
+    var isRecordingActive by remember { mutableStateOf(false) }
+    var isFinalizing by remember { mutableStateOf(false) }
+    var elapsedSeconds by remember { mutableIntStateOf(0) }
+    var liveAmplitude by remember { mutableFloatStateOf(0f) }
+    var usingGeminiLive by remember { mutableStateOf(false) }
+    var statusNotice by remember { mutableStateOf<String?>(null) }
 
-    val speechManager = remember { OnboardingSpeechManager(context) }
-    val isSpeechListening by speechManager.isListening.collectAsState()
-    val speechLiveTranscript by speechManager.liveTranscript.collectAsState()
-    val speechAmplitude by speechManager.amplitude.collectAsState()
+    // On-device fallback used ONLY if user taps Record before background Gemini key activation finishes
+    val fallbackSpeechManager = remember { OnboardingSpeechManager(context) }
+    val fallbackListening by fallbackSpeechManager.isListening.collectAsState()
+    val fallbackTranscript by fallbackSpeechManager.liveTranscript.collectAsState()
+    val fallbackAmplitude by fallbackSpeechManager.amplitude.collectAsState()
 
-    // Shaking haptic animation offset for stage 2
+    // Real Gemini Live session manager (lazy, deterministically released on pause/dispose)
+    var geminiSessionManager by remember { mutableStateOf<FloatingDictationSessionManager?>(null) }
+
+    fun ensureGeminiSessionManager(): FloatingDictationSessionManager {
+        return geminiSessionManager ?: FloatingDictationSessionManager(
+            context = context.applicationContext,
+            onTranscriptUpdated = { fullText ->
+                if (usingGeminiLive) {
+                    liveBubbleTranscript = fullText
+                }
+            },
+            onInterimReceived = {},
+            onFinalSegmentReceived = {},
+            onConnectionStateChanged = {},
+            onAmplitudeChanged = { amp ->
+                if (usingGeminiLive) {
+                    liveAmplitude = amp
+                }
+            },
+            onError = { err ->
+                if (usingGeminiLive && !isFinalizing) {
+                    // Seamless local fallback if network hiccups mid-demo
+                    geminiSessionManager?.stopSession(coroutineScope, "sandbox_error_fallback")
+                    usingGeminiLive = false
+                    statusNotice = if (err.startsWith(FloatingDictationSessionManager.MIC_ERROR_PREFIX)) {
+                        "Microphone busy — tap the bubble to try again"
+                    } else {
+                        "Switched to quick local preview for this demo"
+                    }
+                    if (!err.startsWith(FloatingDictationSessionManager.MIC_ERROR_PREFIX)) {
+                        fallbackSpeechManager.startListening()
+                        isRecordingActive = true
+                    } else {
+                        isRecordingActive = false
+                    }
+                }
+            },
+            onDurationTicked = { seconds ->
+                if (usingGeminiLive) {
+                    elapsedSeconds = seconds
+                }
+            },
+            onSessionLimit = { _, finalizeNow ->
+                if (finalizeNow && usingGeminiLive && !isFinalizing) {
+                    coroutineScope.launch {
+                        isFinalizing = true
+                        val text = geminiSessionManager?.finishActivityAndAwaitTranscript().orEmpty().trim()
+                        isFinalizing = false
+                        isRecordingActive = false
+                        if (text.isNotBlank()) {
+                            typedText = text
+                            liveBubbleTranscript = text
+                            stepStage = 4
+                        }
+                    }
+                }
+            }
+        ).also { geminiSessionManager = it }
+    }
+
+    fun stopAllRecorders(reason: String) {
+        if (usingGeminiLive) {
+            geminiSessionManager?.stopSession(coroutineScope, reason)
+            usingGeminiLive = false
+        }
+        fallbackSpeechManager.stopListening()
+        isRecordingActive = false
+        isFinalizing = false
+        liveAmplitude = 0f
+    }
+
+    fun startDictation() {
+        statusNotice = null
+        liveBubbleTranscript = ""
+        elapsedSeconds = 0
+        liveAmplitude = 0f
+        isFinalizing = false
+
+        val resolvedKey = ApiConfig.resolveApiKey(context)
+        val canUseGemini = !ApiConfig.isPlaceholder(resolvedKey) && isNetworkOnline(context)
+        if (canUseGemini) {
+            usingGeminiLive = true
+            isRecordingActive = true
+            ApiConfig.prewarmGeminiConnection()
+            val mgr = ensureGeminiSessionManager()
+            mgr.clearTranscripts()
+            mgr.startSession(
+                context = context,
+                scope = coroutineScope,
+                apiKey = resolvedKey,
+                model = GeminiLiveWebSocketClient.DEFAULT_MODEL,
+                smartMode = true
+            )
+        } else {
+            usingGeminiLive = false
+            isRecordingActive = true
+            statusNotice = if (isActivatingKey) {
+                "Using quick preview while Gemini activates"
+            } else {
+                null
+            }
+            fallbackSpeechManager.startListening()
+        }
+    }
+
+    // Mirror fallback speech manager state into unified UI state when not on Gemini Live
+    LaunchedEffect(usingGeminiLive, fallbackTranscript, fallbackAmplitude, fallbackListening) {
+        if (!usingGeminiLive && stepStage == 3) {
+            if (fallbackTranscript.isNotBlank()) {
+                liveBubbleTranscript = fallbackTranscript
+            }
+            liveAmplitude = fallbackAmplitude
+            isRecordingActive = fallbackListening
+        }
+    }
+
+    // Tick timer when running fallback speech recognizer (Gemini Live ticks via onDurationTicked)
+    LaunchedEffect(stepStage, usingGeminiLive, isRecordingActive, isFinalizing) {
+        if (stepStage == 3 && !usingGeminiLive && isRecordingActive && !isFinalizing) {
+            while (isActive) {
+                delay(1_000L)
+                elapsedSeconds += 1
+            }
+        }
+    }
+
+    // Shaking animation offset for stage 2 (zero haptics)
     val shakeOffset = remember { Animatable(0f) }
 
-    DisposableEffect(Unit) {
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_PAUSE && (isRecordingActive || isFinalizing)) {
+                stopAllRecorders("sandbox_lifecycle_pause")
+                if (stepStage == 3) stepStage = 2
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
-            speechManager.stopListening()
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            geminiSessionManager?.release()
+            geminiSessionManager = null
+            fallbackSpeechManager.stopListening()
         }
     }
 
     LaunchedEffect(stepStage) {
         when (stepStage) {
             2 -> {
-                // v26: the bubble still shakes every 0.8 s, but there is no vibration or haptic tick.
                 shakeOffset.animateTo(
                     targetValue = 0f,
                     animationSpec = infiniteRepeatable(
@@ -162,14 +317,7 @@ fun OnboardingSandboxScreen(
     ) { isGranted ->
         if (isGranted) {
             stepStage = 3
-            speechManager.startListening()
-        }
-    }
-
-    // Live sync real speech transcript stream into typed text
-    LaunchedEffect(speechLiveTranscript) {
-        if (stepStage == 3 && speechLiveTranscript.isNotBlank()) {
-            typedText = speechLiveTranscript
+            startDictation()
         }
     }
 
@@ -189,7 +337,7 @@ fun OnboardingSandboxScreen(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 24.dp, vertical = 20.dp),
+                    .padding(horizontal = 24.dp, vertical = 18.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 // Real Chat Input Box (triggers user's native keyboard)
@@ -228,9 +376,7 @@ fun OnboardingSandboxScreen(
                         ) {
                             BasicTextField(
                                 value = typedText,
-                                onValueChange = {
-                                    typedText = it
-                                },
+                                onValueChange = { typedText = it },
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .focusRequester(focusRequester)
@@ -239,7 +385,7 @@ fun OnboardingSandboxScreen(
                                             stepStage = 2
                                         }
                                     },
-                                singleLine = true,
+                                maxLines = 3,
                                 textStyle = TextStyle(
                                     fontSize = 16.sp,
                                     color = OnboardingInkBlack,
@@ -268,7 +414,36 @@ fun OnboardingSandboxScreen(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(20.dp))
+                Spacer(modifier = Modifier.height(18.dp))
+
+                // Subtle engine status indicator if key is still activating in background
+                if (!isApiKeyReady && isActivatingKey && stepStage in 1..2) {
+                    Surface(
+                        shape = RoundedCornerShape(50),
+                        color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.65f),
+                        modifier = Modifier
+                            .padding(bottom = 12.dp)
+                            .testTag("sandbox_key_activating_pill")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(13.dp),
+                                strokeWidth = 1.8.dp,
+                                color = MaterialTheme.colorScheme.onSecondaryContainer
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Connecting your Gemini voice key...",
+                                fontSize = 12.5.sp,
+                                color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+                    }
+                }
 
                 // Prompt Text depending on Stage
                 when (stepStage) {
@@ -281,7 +456,8 @@ fun OnboardingSandboxScreen(
                                 append(" the text box above")
                             },
                             fontSize = 17.sp,
-                            color = OnboardingInkBlack
+                            color = OnboardingInkBlack,
+                            textAlign = TextAlign.Center
                         )
                     }
                     2 -> {
@@ -290,19 +466,31 @@ fun OnboardingSandboxScreen(
                                 withStyle(SpanStyle(color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)) {
                                     append("Tap")
                                 }
-                                append(" the lifesaver bubble")
+                                append(" the Lifesaver bubble to speak")
                             },
                             fontSize = 17.sp,
-                            color = OnboardingInkBlack
+                            color = OnboardingInkBlack,
+                            textAlign = TextAlign.Center
                         )
                     }
                     3 -> {
                         Text(
-                            text = "Say something into the bubble!",
-                            fontSize = 18.sp,
+                            text = if (isFinalizing) "Polishing with Gemini..." else "Say something, then tap Complete!",
+                            fontSize = 17.5.sp,
                             fontWeight = FontWeight.Medium,
-                            color = OnboardingInkBlack
+                            color = OnboardingInkBlack,
+                            textAlign = TextAlign.Center
                         )
+                        val activeNotice = statusNotice
+                        if (!activeNotice.isNullOrBlank()) {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                text = activeNotice,
+                                fontSize = 13.sp,
+                                color = OnboardingMutedText,
+                                textAlign = TextAlign.Center
+                            )
+                        }
                     }
                     4 -> {
                         Text(
@@ -313,7 +501,10 @@ fun OnboardingSandboxScreen(
                         )
                         Spacer(modifier = Modifier.height(18.dp))
                         Button(
-                            onClick = onComplete,
+                            onClick = {
+                                stopAllRecorders("sandbox_continue")
+                                onComplete()
+                            },
                             shape = RoundedCornerShape(14.dp),
                             border = BorderStroke(1.5.dp, OnboardingBorderStroke),
                             colors = ButtonDefaults.buttonColors(
@@ -334,9 +525,28 @@ fun OnboardingSandboxScreen(
                         }
                     }
                 }
+
+                if (stepStage < 4) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    TextButton(
+                        onClick = {
+                            stopAllRecorders("sandbox_skip")
+                            focusManager.clearFocus()
+                            keyboardController?.hide()
+                            onComplete()
+                        },
+                        modifier = Modifier.testTag("btn_sandbox_skip")
+                    ) {
+                        Text(
+                            text = "Skip practice",
+                            fontSize = 14.sp,
+                            color = OnboardingMutedText
+                        )
+                    }
+                }
             }
 
-            // Lower Section: Exact Floating Bubble / Notched Container docked right above native keyboard
+            // Lower Section: Exact Live Original Bubble docked right above native keyboard
             if (stepStage == 2 || stepStage == 3) {
                 Column(
                     modifier = Modifier
@@ -355,7 +565,7 @@ fun OnboardingSandboxScreen(
                                 Box(
                                     modifier = Modifier
                                         .offset(x = shakeOffset.value.dp)
-                                        .size(50.dp)
+                                        .size(52.dp)
                                         .clickable {
                                             val hasPermission = ContextCompat.checkSelfPermission(
                                                 context,
@@ -363,7 +573,7 @@ fun OnboardingSandboxScreen(
                                             ) == PackageManager.PERMISSION_GRANTED
                                             if (hasPermission) {
                                                 stepStage = 3
-                                                speechManager.startListening()
+                                                startDictation()
                                             } else {
                                                 permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                                             }
@@ -381,53 +591,69 @@ fun OnboardingSandboxScreen(
                         }
 
                         3 -> {
-                            // The Exact App Floating Dictation Container docked right above the keyboard!
-                            val liveText = if (typedText.isNotBlank()) typedText else speechLiveTranscript
-
-                            // Same as the live bubble: the pill buttons keep their size at any font scale.
+                            // Exact Live Original Bubble: Cancel | red blinking dot + 00:00 timer | Complete (NO Polish button)
                             val sandboxDensity = LocalDensity.current
                             CompositionLocalProvider(
                                 LocalDensity provides Density(sandboxDensity.density, fontScale = 1f)
                             ) {
                                 FloatingDictationPopup(
-                                    transcriptText = liveText,
-                                    isRecording = isSpeechListening,
-                                    isPendingFinalizing = false,
-                                    isPolishing = isPolishingInProgress,
-                                    audioAmplitude = speechAmplitude,
+                                    transcriptText = liveBubbleTranscript,
+                                    isRecording = isRecordingActive,
+                                    isPendingFinalizing = isFinalizing,
+                                    isPolishing = false,
+                                    elapsedSeconds = elapsedSeconds,
+                                    audioAmplitude = liveAmplitude,
+                                    showPolish = false,
                                     onCancelClick = {
-                                        speechManager.stopListening()
+                                        stopAllRecorders("sandbox_cancel")
+                                        liveBubbleTranscript = ""
                                         stepStage = 2
                                     },
-                                    onPolishClick = {
-                                        speechManager.stopListening()
-                                        val currentText = typedText.ifBlank { speechLiveTranscript }
-                                        if (currentText.isBlank()) return@FloatingDictationPopup
-
-                                        typedText = currentText
-                                        coroutineScope.launch {
-                                            isPolishingInProgress = true
-                                            // v26: no separate polish client. Smart polish happens in the
-                                            // live transcription itself, so the demo tidies the text locally.
-                                            kotlinx.coroutines.delay(600)
-                                            typedText = SandboxPolish.tidy(currentText)
-                                            isPolishingInProgress = false
-                                        }
-                                    },
+                                    onPolishClick = {},
                                     onCompleteClick = {
-                                        speechManager.stopListening()
-                                        val finalRecordedText = typedText.ifBlank { speechLiveTranscript }
-                                        if (finalRecordedText.isNotBlank()) {
-                                            typedText = finalRecordedText
-                                        }
-                                        stepStage = 4
-                                    },
-                                    showPolish = true,
-                                    onLifebuoyClick = {
-                                        if (isSpeechListening) {
-                                            speechManager.stopListening()
+                                        if (isFinalizing) return@FloatingDictationPopup
+                                        if (usingGeminiLive) {
+                                            coroutineScope.launch {
+                                                isFinalizing = true
+                                                isRecordingActive = false
+                                                val result = geminiSessionManager
+                                                    ?.finishActivityAndAwaitTranscript()
+                                                    .orEmpty()
+                                                    .trim()
+                                                usingGeminiLive = false
+                                                isFinalizing = false
+                                                val finalText = result.ifBlank { liveBubbleTranscript.trim() }
+                                                if (finalText.isNotBlank()) {
+                                                    typedText = finalText
+                                                    liveBubbleTranscript = finalText
+                                                    stepStage = 4
+                                                } else {
+                                                    statusNotice = "Didn't catch any speech — tap the bubble to try again"
+                                                    stepStage = 2
+                                                }
+                                            }
                                         } else {
-                                            speechManager.startListening()
+                                            fallbackSpeechManager.stopListening()
+                                            isRecordingActive = false
+                                            val raw = liveBubbleTranscript.ifBlank { fallbackTranscript }.trim()
+                                            val tidied = SandboxPolish.tidy(raw)
+                                            if (tidied.isNotBlank()) {
+                                                typedText = tidied
+                                                liveBubbleTranscript = tidied
+                                                stepStage = 4
+                                            } else {
+                                                statusNotice = "Didn't catch any speech — tap the bubble to try again"
+                                                stepStage = 2
+                                            }
+                                        }
+                                    },
+                                    onLifebuoyClick = {
+                                        if (isFinalizing) return@FloatingDictationPopup
+                                        if (isRecordingActive) {
+                                            stopAllRecorders("sandbox_toggle_stop")
+                                            stepStage = 2
+                                        } else {
+                                            startDictation()
                                         }
                                     },
                                     modifier = Modifier
@@ -445,7 +671,7 @@ fun OnboardingSandboxScreen(
     }
 }
 
-/** The sandbox "Polish" demo: trims, capitalises the first letter and ends with a full stop. */
+/** Local tidy helper used only when on-device fallback runs before Gemini key activation finishes. */
 internal object SandboxPolish {
     fun tidy(text: String): String {
         val cleaned = text.trim().replaceFirstChar {

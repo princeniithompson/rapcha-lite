@@ -94,9 +94,9 @@ class FloatingBubbleOptimizationTest {
             onRingClick = { ringClicks++ },
             onRepairClick = { repairClicks++ },
             onLongPressBubble = {},
-            onDragStart = {},
+            onDragStart = { _, _ -> },
             onDrag = { _, _ -> drags++ },
-            onDragEnd = {}
+            onDragEnd = { _, _ -> }
         )
 
         bubbleView.layout(0, 0, 200, 200)

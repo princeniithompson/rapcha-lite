@@ -73,6 +73,53 @@ object ApiConfig {
         return "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent"
     }
 
+    /** REST Server-Sent Events streaming generateContent URL (for real-time Telescope output). */
+    fun geminiStreamGenerateContentUrl(modelName: String): String {
+        val model = modelName.trim()
+        return "https://generativelanguage.googleapis.com/v1beta/models/$model:streamGenerateContent?alt=sse"
+    }
+
+    private const val GEMINI_HOST = "generativelanguage.googleapis.com"
+    private const val PREWARM_MIN_INTERVAL_MS = 45_000L
+    private val lastPrewarmAtMs = java.util.concurrent.atomic.AtomicLong(0L)
+    private val prewarmExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "rapcha-net-prewarm").apply { isDaemon = true }
+    }
+
+    /**
+     * Pre-warms OS DNS and an HTTP/1.1 TLS socket inside OkHttp's shared ConnectionPool for
+     * Google's Gemini host before the user taps Record. Using HTTP/1.1 matches OkHttp's
+     * RealWebSocket upgrade Address so `newWebSocket()` can reuse the warm TCP+TLS socket
+     * directly instead of negotiating a fresh handshake. Sends zero audio and uses zero quota.
+     */
+    fun prewarmGeminiConnection() {
+        val now = android.os.SystemClock.elapsedRealtime()
+        val prev = lastPrewarmAtMs.get()
+        if (prev != 0L && (now - prev) < PREWARM_MIN_INTERVAL_MS) return
+        if (!lastPrewarmAtMs.compareAndSet(prev, now)) return
+
+        prewarmExecutor.execute {
+            try {
+                java.net.InetAddress.getAllByName(GEMINI_HOST)
+                val req = okhttp3.Request.Builder()
+                    .url("https://$GEMINI_HOST/")
+                    .head()
+                    .build()
+                sharedClient.newBuilder()
+                    .protocols(listOf(okhttp3.Protocol.HTTP_1_1))
+                    .connectTimeout(5, TimeUnit.SECONDS)
+                    .readTimeout(5, TimeUnit.SECONDS)
+                    .callTimeout(6, TimeUnit.SECONDS)
+                    .build()
+                    .newCall(req)
+                    .execute()
+                    .use { /* HTTP/1.1 TLS socket returned warm to shared ConnectionPool */ }
+            } catch (_: Throwable) {
+                // Best-effort only; never disturb UI or log noise when offline.
+            }
+        }
+    }
+
     /**
      * v23: one process-wide client. Callers that need different settings use newBuilder(), which
      * shares the same connection pool, dispatcher threads and TLS session cache, so a new Live

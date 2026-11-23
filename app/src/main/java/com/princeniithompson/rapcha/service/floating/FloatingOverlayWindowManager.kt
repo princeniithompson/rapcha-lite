@@ -10,9 +10,12 @@ import android.os.Looper
 import android.provider.Settings
 import android.util.Log
 import android.view.Gravity
+import android.view.HapticFeedbackConstants
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
+import android.view.animation.DecelerateInterpolator
+import android.view.animation.OvershootInterpolator
 import android.widget.FrameLayout
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -32,6 +35,32 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 
+internal object BubbleInteractionPolicy {
+    /**
+     * Unified 2-step tap from hidden half-ring state (applies whether Always on Screen is OFF or ON):
+     * - 1st tap while hidden/tucked -> wake bubble only (do NOT start voice typing).
+     * - Tap while already awake -> start voice typing immediately.
+     */
+    fun shouldConsumeTapToWake(wasHiddenOnTouchDown: Boolean): Boolean = wasHiddenOnTouchDown
+
+    /**
+     * When the keyboard closes while Always on Screen is ON, an already-hidden bubble must stay
+     * peacefully tucked in the bezel instead of popping awake for 3 seconds.
+     */
+    fun shouldWakeOnKeyboardHide(alwaysOnScreen: Boolean, alreadyHidden: Boolean): Boolean = false
+
+    /**
+     * When Always on Screen is ON and the keyboard closes before the 3-second idle timer finishes
+     * (with no active recording or Telescope overlay), glide & fade immediately back into the
+     * side bezel half-ring instead of waiting out the countdown.
+     */
+    fun shouldTuckImmediatelyOnKeyboardHide(
+        alwaysOnScreen: Boolean,
+        alreadyHidden: Boolean,
+        isSessionOrTelescopeActive: Boolean
+    ): Boolean = alwaysOnScreen && !alreadyHidden && !isSessionOrTelescopeActive
+}
+
 /**
  * Manages the overlay WindowManager, layout parameters, lifecycle, and view composition
  * for the floating voice bubble.
@@ -45,7 +74,8 @@ class FloatingOverlayWindowManager(private val context: Context) {
     companion object {
         private const val TAG = "FloatingOverlayWinMgr"
         private const val SHRINK_TIMEOUT_MS = 3000L
-        const val BUBBLE_ANIM_MS = 140L
+        const val BUBBLE_ANIM_MS = 180L
+        private const val BUBBLE_CONCEAL_MS = 150L
 
         private val ATTACH_BACKOFF_MS = longArrayOf(250L, 1_000L, 3_000L, 10_000L)
 
@@ -62,6 +92,19 @@ class FloatingOverlayWindowManager(private val context: Context) {
                 WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
                 WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED
+
+        /**
+         * Adds Android's built-in [WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON] only while
+         * a voice typing session is active so 10-minute sessions stay awake without extra
+         * permissions or idle battery drain.
+         */
+        fun resolveOverlayFlags(keepScreenOn: Boolean): Int {
+            return if (keepScreenOn) {
+                OVERLAY_WINDOW_FLAGS or WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+            } else {
+                OVERLAY_WINDOW_FLAGS
+            }
+        }
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -84,6 +127,20 @@ class FloatingOverlayWindowManager(private val context: Context) {
     private var onCompleteClickCallback: () -> Unit = {}
     private var onLongPressBubbleCallback: () -> Unit = {}
     private var onRepairClickCallback: () -> Unit = {}
+    private var onTelescopeInsertTextCallback: (String) -> Unit = {}
+
+    private val telescopeHighlightOverlay = TelescopeHighlightOverlay(context)
+    private var telescopeActionOverlay: TelescopeActionOverlay? = null
+    @Volatile
+    private var telescopeSnapshotNodes: List<ScreenTextNode> = emptyList()
+    private val telescopeFocusTracker = TelescopeFocusTracker()
+    private val telescopeDwellRunnable = Runnable { handleTelescopeDwellElapsed() }
+    private var currentHighlightedNode: ScreenTextNode? = null
+    private var isTelescopeDragging = false
+    private var overlayHalfTucked = false
+    private var wasHalfTuckedAtTouchDown = false
+    private val revealInterpolator = OvershootInterpolator(1.2f)
+    private val concealInterpolator = DecelerateInterpolator(1.4f)
 
     @Volatile
     var lastHideReason: String? = null
@@ -113,11 +170,16 @@ class FloatingOverlayWindowManager(private val context: Context) {
 
     fun isWindowVisible(): Boolean = overlayView?.visibility == View.VISIBLE
 
+    fun isTelescopeOverlayActive(): Boolean {
+        return isTelescopeDragging || (telescopeActionOverlay?.isShowing == true)
+    }
+
     fun shouldBeVisible(): Boolean {
         return overlayRecording.value ||
             overlayExpanded.value ||
             overlayPendingFinalizing.value ||
             FloatingBubbleManager.isKeyboardVisible.value ||
+            FloatingBubbleManager.isAlwaysOnScreen.value ||
             A11yWatchdog.repairKind.value != A11yRepairKind.NONE
     }
 
@@ -138,13 +200,25 @@ class FloatingOverlayWindowManager(private val context: Context) {
         onCancelClick: () -> Unit,
         onCompleteClick: () -> Unit,
         onLongPressBubble: () -> Unit = {},
-        onRepairClick: () -> Unit = {}
+        onRepairClick: () -> Unit = {},
+        onTelescopeInsertText: (String) -> Unit = {}
     ) {
         onRingClickCallback = onRingClick
         onCancelClickCallback = onCancelClick
         onCompleteClickCallback = onCompleteClick
         onLongPressBubbleCallback = onLongPressBubble
         onRepairClickCallback = onRepairClick
+        onTelescopeInsertTextCallback = onTelescopeInsertText
+
+        telescopeActionOverlay = TelescopeActionOverlay(
+            context = context,
+            onInsertText = { text -> onTelescopeInsertTextCallback(text) },
+            onDismissed = {
+                currentHighlightedNode = null
+                telescopeHighlightOverlay.hideAndDetach()
+                resetInactivityTimer(keepShrunk = false)
+            }
+        )
 
         lifecycleOwner.onCreate()
         lifecycleOwner.onStart()
@@ -218,13 +292,61 @@ class FloatingOverlayWindowManager(private val context: Context) {
 
         val nativeIdle = IdleBubbleNativeView(
             context = safeContext,
-            onRingClick = { onRingClickCallback() },
-            onRepairClick = { onRepairClickCallback() },
-            onLongPressBubble = { onLongPressBubbleCallback() },
-            onDragStart = {
-                resetInactivityTimer(keepShrunk = true)
+            liveThemeContext = context,
+            onRingClick = {
+                if (BubbleInteractionPolicy.shouldConsumeTapToWake(wasHalfTuckedAtTouchDown)) {
+                    wasHalfTuckedAtTouchDown = false
+                    wakeFromHalfTuck(animatePosition = true)
+                    resetInactivityTimer(keepShrunk = false)
+                } else {
+                    wasHalfTuckedAtTouchDown = false
+                    dismissTelescopeWorkspace()
+                    onRingClickCallback()
+                }
+            },
+            onRepairClick = {
+                wasHalfTuckedAtTouchDown = false
+                wakeFromHalfTuck(animatePosition = true)
+                onRepairClickCallback()
+            },
+            onLongPressBubble = {
+                wasHalfTuckedAtTouchDown = false
+                wakeFromHalfTuck(animatePosition = true)
+                onLongPressBubbleCallback()
+            },
+            onTouchDown = {
+                wasHalfTuckedAtTouchDown = overlayHalfTucked
+                mainHandler.removeCallbacks(shrinkRunnable)
+                dismissTelescopeWorkspace()
+                // Single lightweight Accessibility text snapshot on ACTION_DOWN (never on ACTION_MOVE)
+                telescopeSnapshotNodes = emptyList()
+                currentHighlightedNode = null
+                telescopeFocusTracker.reset()
+                overlayScope?.launch(Dispatchers.Default) {
+                    val nodes = com.princeniithompson.rapcha.service.RapchaAccessibilityService.instance
+                        ?.captureVisibleTextNodes()
+                        .orEmpty()
+                    telescopeSnapshotNodes = nodes
+                }
+            },
+            onDragStart = { rawX, rawY ->
+                wasHalfTuckedAtTouchDown = false
+                mainHandler.removeCallbacks(shrinkRunnable)
+                mainHandler.removeCallbacks(telescopeDwellRunnable)
+                dragSnapHandler.cancel()
+                telescopeFocusTracker.reset()
+                currentHighlightedNode = null
+                isTelescopeDragging = true
+                overlayHalfTucked = false
+                overlayShrunk.value = false
+                idleBubbleView?.setTuckProgress(0f)
+                idleBubbleView?.refreshDynamicMagnifierColors()
+                syncIdleBubbleState()
+                moveTelescopeMagnifierTo(rawX, rawY)
             },
             onDrag = { dx, dy ->
+                // Collapsed telescope drag uses rigid 1:1 raw placement in onDragMoveRaw (zero drift/flip).
+                if (isTelescopeDragging && !overlayExpanded.value) return@IdleBubbleNativeView
                 val lp = layoutParams ?: return@IdleBubbleNativeView
                 dragSnapHandler.handleOverlayDrag(
                     dx = dx,
@@ -232,21 +354,51 @@ class FloatingOverlayWindowManager(private val context: Context) {
                     isExpanded = overlayExpanded.value,
                     lp = lp,
                     windowManager = windowManager,
-                    overlayView = overlayView
+                    overlayView = overlayView,
+                    freeVerticalDrag = !overlayExpanded.value
                 )
             },
-            onDragEnd = {
+            onDragMoveRaw = { rawX, rawY ->
+                if (!isTelescopeDragging) return@IdleBubbleNativeView
+                moveTelescopeMagnifierTo(rawX, rawY)
+            },
+            onDragEnd = { lastRawX, lastRawY ->
                 val lp = layoutParams ?: return@IdleBubbleNativeView
-                dragSnapHandler.handleOverlayDragEnd(
-                    isExpanded = overlayExpanded.value,
-                    lp = lp,
-                    windowManager = windowManager,
-                    overlayView = overlayView,
-                    onComplete = {
-                        syncIdleBubbleState()
-                        resetInactivityTimer(keepShrunk = true)
-                    }
-                )
+                mainHandler.removeCallbacks(telescopeDwellRunnable)
+                isTelescopeDragging = false
+                val selectedNode = currentHighlightedNode
+                telescopeFocusTracker.reset()
+                telescopeSnapshotNodes = emptyList()
+                syncIdleBubbleState()
+
+                if (selectedNode != null) {
+                    // Keep highlight on text, return lifesaver ring to resting position, open Action Bar
+                    telescopeHighlightOverlay.showHighlight(selectedNode.bounds)
+                    dragSnapHandler.animateReturnToRestingPosition(
+                        lp = lp,
+                        windowManager = windowManager,
+                        overlayView = overlayView,
+                        onComplete = {
+                            syncIdleBubbleState()
+                        }
+                    )
+                    telescopeActionOverlay?.show(selectedNode.text, selectedNode.bounds)
+                } else {
+                    // Clean bubble move: no text node locked -> snap to nearest edge, do NOT open Action Bar.
+                    telescopeHighlightOverlay.hideAndDetach()
+                    dragSnapHandler.handleOverlayDragEnd(
+                        isExpanded = overlayExpanded.value,
+                        lp = lp,
+                        windowManager = windowManager,
+                        overlayView = overlayView,
+                        releaseRawX = lastRawX,
+                        releaseRawY = lastRawY,
+                        onComplete = {
+                            syncIdleBubbleState()
+                            resetInactivityTimer(keepShrunk = false)
+                        }
+                    )
+                }
             }
         )
         rootContainer.addView(
@@ -285,7 +437,9 @@ class FloatingOverlayWindowManager(private val context: Context) {
         scope.launch {
             FloatingBubbleManager.imeTopPx.collect { imeTop ->
                 dragSnapHandler.updateImeTopPx(imeTop)
-                if (imeTop > 0 && (shouldBeVisible() || isWindowVisible())) {
+                // Only dock the expanded recording bar above the keyboard; the collapsed
+                // lifesaver bubble stays put at its saved Y without jumping over keys.
+                if (imeTop > 0 && overlayExpanded.value && (shouldBeVisible() || isWindowVisible())) {
                     syncVerticalPositionForKeyboard(imeTop)
                 }
             }
@@ -297,7 +451,15 @@ class FloatingOverlayWindowManager(private val context: Context) {
             FloatingBubbleManager.isClipboardFallbackIndicator.collect { syncIdleBubbleState() }
         }
         scope.launch {
-            overlayRecording.collect { syncIdleBubbleState() }
+            overlayRecording.collect { recording ->
+                syncIdleBubbleState()
+                updateKeepScreenOnFlag(recording || overlayPendingFinalizing.value)
+            }
+        }
+        scope.launch {
+            overlayPendingFinalizing.collect { finalizing ->
+                updateKeepScreenOnFlag(overlayRecording.value || finalizing)
+            }
         }
         scope.launch {
             overlayShrunk.collect { syncIdleBubbleState() }
@@ -313,6 +475,7 @@ class FloatingOverlayWindowManager(private val context: Context) {
                     revealBubble(root)
                 } else if (kind == A11yRepairKind.NONE &&
                     !FloatingBubbleManager.isKeyboardVisible.value &&
+                    !FloatingBubbleManager.isAlwaysOnScreen.value &&
                     !overlayRecording.value &&
                     !overlayExpanded.value
                 ) {
@@ -324,6 +487,21 @@ class FloatingOverlayWindowManager(private val context: Context) {
         resetInactivityTimer()
     }
 
+    private fun updateKeepScreenOnFlag(keepScreenOn: Boolean) {
+        val lp = layoutParams ?: return
+        val nextFlags = resolveOverlayFlags(keepScreenOn)
+        if (lp.flags == nextFlags) return
+        lp.flags = nextFlags
+        val view = overlayView ?: return
+        if (view.isAttachedToWindow) {
+            try {
+                windowManager?.updateViewLayout(view, lp)
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed updating FLAG_KEEP_SCREEN_ON=$keepScreenOn", e)
+            }
+        }
+    }
+
     private fun syncIdleBubbleState() {
         idleBubbleView?.updateState(
             recording = overlayRecording.value,
@@ -331,8 +509,182 @@ class FloatingOverlayWindowManager(private val context: Context) {
             snappedToRight = dragSnapHandler.isSnappedToRight,
             networkProblem = FloatingBubbleManager.isNetworkProblem.value,
             clipboardFallback = FloatingBubbleManager.isClipboardFallbackIndicator.value,
-            repairKind = A11yWatchdog.repairKind.value
+            repairKind = A11yWatchdog.repairKind.value,
+            halfTucked = overlayHalfTucked,
+            telescopeMode = isTelescopeDragging
         )
+    }
+
+    private fun moveTelescopeMagnifierTo(rawX: Float, rawY: Float) {
+        val lp = layoutParams ?: return
+        val displayMetrics = context.resources.displayMetrics
+        val density = displayMetrics.density
+        val windowSize = if (lp.width > 0) lp.width else (BubbleChromeGeometry.IDLE_WINDOW_SIZE_DP * density).toInt()
+        val placement = TelescopeMagnifierGeometry.computePlacement(
+            rawFingerX = rawX,
+            rawFingerY = rawY,
+            windowSizePx = windowSize,
+            density = density,
+            screenWidth = displayMetrics.widthPixels,
+            screenHeight = displayMetrics.heightPixels
+        )
+        if (lp.x != placement.windowX || lp.y != placement.windowY) {
+            lp.x = placement.windowX
+            lp.y = placement.windowY
+            val view = overlayView
+            if (view?.isAttachedToWindow == true) {
+                try {
+                    windowManager?.updateViewLayout(view, lp)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Error updating magnifier position during drag", e)
+                }
+            }
+        }
+
+        when (telescopeFocusTracker.onLensMoved(
+            lensX = placement.lensCenterX,
+            lensY = placement.lensCenterY,
+            density = density,
+            sortedNodes = telescopeSnapshotNodes
+        )) {
+            TelescopeFocusTracker.MoveEffect.KEEP_LOCKED,
+            TelescopeFocusTracker.MoveEffect.KEEP_DWELLING -> Unit
+            TelescopeFocusTracker.MoveEffect.RESTART_DWELL -> {
+                if (currentHighlightedNode != null) {
+                    currentHighlightedNode = null
+                    telescopeHighlightOverlay.clearHighlight()
+                }
+                mainHandler.removeCallbacks(telescopeDwellRunnable)
+                mainHandler.postDelayed(telescopeDwellRunnable, TelescopeFocusTracker.FOCUS_DWELL_MS)
+            }
+        }
+    }
+
+    private fun handleTelescopeDwellElapsed() {
+        if (!isTelescopeDragging) return
+        val hit = telescopeFocusTracker.onDwellElapsed(telescopeSnapshotNodes)
+        if (hit != null) {
+            val isNewLock = hit !== currentHighlightedNode
+            currentHighlightedNode = hit
+            telescopeHighlightOverlay.showHighlight(hit.bounds)
+            if (isNewLock) {
+                idleBubbleView?.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+            }
+        } else if (currentHighlightedNode != null) {
+            currentHighlightedNode = null
+            telescopeHighlightOverlay.clearHighlight()
+        }
+    }
+
+    fun dismissTelescopeWorkspace() {
+        mainHandler.removeCallbacks(telescopeDwellRunnable)
+        telescopeFocusTracker.reset()
+        currentHighlightedNode = null
+        telescopeSnapshotNodes = emptyList()
+        if (isTelescopeDragging) {
+            isTelescopeDragging = false
+            syncIdleBubbleState()
+        }
+        telescopeActionOverlay?.dismiss(notifyCaller = false)
+        telescopeHighlightOverlay.hideAndDetach()
+    }
+
+    private fun wakeFromHalfTuck(animatePosition: Boolean) {
+        mainHandler.removeCallbacks(shrinkRunnable)
+        val wasTucked = overlayHalfTucked
+        overlayHalfTucked = false
+        if (wasTucked) {
+            syncIdleBubbleState()
+            if (animatePosition) {
+                val lp = layoutParams
+                if (lp != null && !overlayExpanded.value) {
+                    dragSnapHandler.animateHalfEdgeTuck(
+                        tucked = false,
+                        lp = lp,
+                        windowManager = windowManager,
+                        overlayView = overlayView,
+                        onProgress = { progress -> idleBubbleView?.setTuckProgress(progress) }
+                    )
+                } else {
+                    idleBubbleView?.setTuckProgress(0f)
+                }
+            } else {
+                idleBubbleView?.setTuckProgress(0f)
+            }
+        }
+    }
+
+    /**
+     * Silently places the collapsed lifesaver window at its awake non-bezel resting position
+     * (20dp off edge, saved Y) before popping into view.
+     */
+    private fun prepareCollapsedAwakeLayout() {
+        val lp = layoutParams ?: return
+        val density = context.resources.displayMetrics.density
+        val windowSize = (BubbleChromeGeometry.IDLE_WINDOW_SIZE_DP * density).toInt()
+        val targetX = dragSnapHandler.getCollapsedRestingX(windowSize)
+        val targetY = dragSnapHandler.resolveYForWindow(windowHeightPx = windowSize, isExpanded = false)
+        dragSnapHandler.cancel()
+        overlayHalfTucked = false
+        wasHalfTuckedAtTouchDown = false
+        overlayShrunk.value = false
+        idleBubbleView?.setTuckProgress(0f)
+        syncIdleBubbleState()
+
+        val changed = lp.width != windowSize ||
+            lp.height != windowSize ||
+            lp.x != targetX ||
+            lp.y != targetY
+        lp.width = windowSize
+        lp.height = windowSize
+        lp.gravity = Gravity.TOP or Gravity.START
+        lp.flags = OVERLAY_WINDOW_FLAGS
+        lp.x = targetX
+        lp.y = targetY
+        if (changed && isAttached()) {
+            try {
+                windowManager?.updateViewLayout(overlayView, lp)
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed preparing collapsed awake layout", e)
+            }
+        }
+    }
+
+    fun onAlwaysOnScreenChanged(enabled: Boolean, isSessionActive: Boolean) {
+        fun apply() {
+            val root = overlayView ?: return
+            if (enabled) {
+                if (!root.isAttachedToWindow) {
+                    attachWithRetry("always_on_screen")
+                }
+                if (!overlayExpanded.value && (root.visibility != View.VISIBLE || isConcealing)) {
+                    prepareCollapsedAwakeLayout()
+                } else {
+                    wakeFromHalfTuck(animatePosition = true)
+                }
+                revealBubble(root)
+                resetInactivityTimer(keepShrunk = false)
+            } else {
+                mainHandler.removeCallbacks(shrinkRunnable)
+                if (!FloatingBubbleManager.isKeyboardVisible.value &&
+                    !isSessionActive &&
+                    !overlayRecording.value &&
+                    !overlayExpanded.value &&
+                    A11yWatchdog.repairKind.value == A11yRepairKind.NONE
+                ) {
+                    dismissTelescopeWorkspace()
+                    dragSnapHandler.cancel()
+                    concealBubble(root, BubbleHealthLog.HIDE_NO_IME_AFTER_SETTLE)
+                } else if (!overlayHalfTucked) {
+                    resetInactivityTimer(keepShrunk = true)
+                }
+            }
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            apply()
+        } else {
+            mainHandler.post { apply() }
+        }
     }
 
     private fun syncVerticalPositionForKeyboard(imeTopPx: Int) {
@@ -572,12 +924,13 @@ class FloatingOverlayWindowManager(private val context: Context) {
 
     fun resetInactivityTimer(keepShrunk: Boolean = false) {
         mainHandler.removeCallbacks(shrinkRunnable)
-        if (!overlayRecording.value && !overlayExpanded.value) {
+        if (!overlayRecording.value && !overlayExpanded.value && !isTelescopeOverlayActive()) {
             if (!keepShrunk) {
                 overlayShrunk.value = false
+                wakeFromHalfTuck(animatePosition = false)
                 mainHandler.postDelayed(shrinkRunnable, SHRINK_TIMEOUT_MS)
             } else {
-                if (!overlayShrunk.value) {
+                if (!overlayShrunk.value && !overlayHalfTucked) {
                     mainHandler.postDelayed(shrinkRunnable, SHRINK_TIMEOUT_MS)
                 }
             }
@@ -587,18 +940,34 @@ class FloatingOverlayWindowManager(private val context: Context) {
     fun expandToFullSize() {
         mainHandler.removeCallbacks(shrinkRunnable)
         overlayShrunk.value = false
+        wakeFromHalfTuck(animatePosition = true)
         syncIdleBubbleState()
     }
 
     private fun applyShrink() {
-        if (!overlayRecording.value && !overlayExpanded.value) {
-            overlayShrunk.value = true
-            syncIdleBubbleState()
-        }
+        if (overlayRecording.value || overlayExpanded.value || isTelescopeOverlayActive()) return
+        if (overlayView?.visibility != View.VISIBLE || isConcealing || overlayHalfTucked) return
+        // Unified idle hide for BOTH Always-on-Screen OFF and ON: smoothly fade and tuck
+        // 50% into the nearest left/right bezel without shifting Y.
+        overlayShrunk.value = false
+        overlayHalfTucked = true
+        syncIdleBubbleState()
+        val lp = layoutParams ?: return
+        dragSnapHandler.animateHalfEdgeTuck(
+            tucked = true,
+            lp = lp,
+            windowManager = windowManager,
+            overlayView = overlayView,
+            onProgress = { progress -> idleBubbleView?.setTuckProgress(progress) }
+        )
     }
 
     fun expandPanel() {
         val root = overlayView ?: return
+        dismissTelescopeWorkspace()
+        overlayHalfTucked = false
+        wasHalfTuckedAtTouchDown = false
+        idleBubbleView?.setTuckProgress(0f)
         dragSnapHandler.cancel()
         dragSnapHandler.updateImeTopPx(FloatingBubbleManager.imeTopPx.value)
         isConcealing = false
@@ -638,7 +1007,7 @@ class FloatingOverlayWindowManager(private val context: Context) {
             estHeightPx = (190 * density).toInt()
         }
         lp.gravity = Gravity.TOP or Gravity.START
-        lp.flags = OVERLAY_WINDOW_FLAGS
+        lp.flags = resolveOverlayFlags(keepScreenOn = true)
         lp.y = dragSnapHandler.resolveYForWindow(
             windowHeightPx = estHeightPx,
             isExpanded = true
@@ -659,6 +1028,10 @@ class FloatingOverlayWindowManager(private val context: Context) {
     fun collapsePanel() {
         val wasExpanded = overlayExpanded.value
         overlayExpanded.value = false
+        overlayHalfTucked = false
+        wasHalfTuckedAtTouchDown = false
+        overlayShrunk.value = false
+        idleBubbleView?.setTuckProgress(0f)
         disposeExpandedComposeView()
         idleBubbleView?.visibility = View.VISIBLE
         syncIdleBubbleState()
@@ -666,32 +1039,26 @@ class FloatingOverlayWindowManager(private val context: Context) {
 
         dragSnapHandler.updateImeTopPx(FloatingBubbleManager.imeTopPx.value)
         val lp = layoutParams ?: return
-        val displayMetrics = context.resources.displayMetrics
-        val density = displayMetrics.density
-        val screenWidth = displayMetrics.widthPixels
+        val density = context.resources.displayMetrics.density
         val windowSize = (BubbleChromeGeometry.IDLE_WINDOW_SIZE_DP * density).toInt()
-        val edgeMarginPx = (BubbleChromeGeometry.EDGE_MARGIN_DP * density).toInt()
-        val windowPaddingPx = (BubbleChromeGeometry.WINDOW_PADDING_DP * density).toInt()
-
-        val targetX = if (dragSnapHandler.isSnappedToRight) {
-            (screenWidth - windowSize - edgeMarginPx + windowPaddingPx).coerceAtLeast(0)
-        } else {
-            (edgeMarginPx - windowPaddingPx).coerceAtLeast(0)
-        }
+        val targetX = dragSnapHandler.getCollapsedRestingX(windowSize)
         val targetY = dragSnapHandler.resolveYForWindow(
             windowHeightPx = windowSize,
             isExpanded = false
         )
+        val keepScreenOn = overlayRecording.value || overlayPendingFinalizing.value
+        val targetFlags = resolveOverlayFlags(keepScreenOn)
         val layoutChanged = wasExpanded ||
             lp.width != windowSize ||
             lp.height != windowSize ||
             lp.x != targetX ||
-            lp.y != targetY
+            lp.y != targetY ||
+            lp.flags != targetFlags
 
         lp.width = windowSize
         lp.height = windowSize
         lp.gravity = Gravity.TOP or Gravity.START
-        lp.flags = OVERLAY_WINDOW_FLAGS
+        lp.flags = targetFlags
         lp.x = targetX
         lp.y = targetY
 
@@ -711,6 +1078,7 @@ class FloatingOverlayWindowManager(private val context: Context) {
         fun apply() {
             val root = overlayView ?: return
             if (!FloatingBubbleManager.isKeyboardVisible.value &&
+                !FloatingBubbleManager.isAlwaysOnScreen.value &&
                 A11yWatchdog.repairKind.value == A11yRepairKind.NONE &&
                 !overlayRecording.value &&
                 !overlayExpanded.value
@@ -720,12 +1088,20 @@ class FloatingOverlayWindowManager(private val context: Context) {
             val imeTop = FloatingBubbleManager.imeTopPx.value
             if (imeTop > 0) {
                 dragSnapHandler.updateImeTopPx(imeTop)
-                syncVerticalPositionForKeyboard(imeTop)
+                if (overlayExpanded.value) {
+                    syncVerticalPositionForKeyboard(imeTop)
+                }
             }
             if (!root.isAttachedToWindow) {
                 attachWithRetry(trigger)
             }
-            revealBubble(root)
+            if (!overlayExpanded.value && (root.visibility != View.VISIBLE || isConcealing)) {
+                prepareCollapsedAwakeLayout()
+                revealBubble(root)
+                resetInactivityTimer(keepShrunk = false)
+            } else {
+                revealBubble(root)
+            }
         }
         if (Looper.myLooper() == Looper.getMainLooper()) {
             apply()
@@ -738,22 +1114,73 @@ class FloatingOverlayWindowManager(private val context: Context) {
         fun apply() {
             val root = overlayView ?: return
             val repairActive = A11yWatchdog.repairKind.value != A11yRepairKind.NONE
+            val alwaysOn = FloatingBubbleManager.isAlwaysOnScreen.value
             if (isVisible || repairActive) {
                 val imeTop = FloatingBubbleManager.imeTopPx.value
                 dragSnapHandler.updateImeTopPx(imeTop)
                 if (!root.isAttachedToWindow) {
                     attachWithRetry("keyboard_show")
                 }
-                if (!overlayRecording.value && !overlayExpanded.value) {
-                    collapsePanel()
-                } else if (imeTop > 0) {
-                    syncVerticalPositionForKeyboard(imeTop)
+                if (overlayExpanded.value) {
+                    if (imeTop > 0) {
+                        syncVerticalPositionForKeyboard(imeTop)
+                    }
+                    revealBubble(root)
+                } else if (!overlayRecording.value) {
+                    if (root.visibility != View.VISIBLE || isConcealing) {
+                        // Pop cleanly into view at the awake non-bezel resting spot (zero Y jump)
+                        prepareCollapsedAwakeLayout()
+                        revealBubble(root)
+                        resetInactivityTimer(keepShrunk = false)
+                    } else if (overlayHalfTucked) {
+                        // Peek smoothly out of the bezel horizontally on keyboard open (same Y)
+                        wakeFromHalfTuck(animatePosition = true)
+                        resetInactivityTimer(keepShrunk = false)
+                    } else {
+                        resetInactivityTimer(keepShrunk = false)
+                    }
+                } else {
+                    revealBubble(root)
                 }
-                expandToFullSize()
-                revealBubble(root)
-                resetInactivityTimer(keepShrunk = false)
+            } else if (alwaysOn) {
+                if (isSessionActive || overlayRecording.value || overlayExpanded.value) {
+                    setViewVisibilityImmediate(root, true, null)
+                } else if (isTelescopeOverlayActive()) {
+                    // Keep bubble visible while Telescope drag or action bar is open.
+                } else if (
+                    overlayHalfTucked &&
+                    root.visibility == View.VISIBLE &&
+                    !isConcealing &&
+                    !BubbleInteractionPolicy.shouldWakeOnKeyboardHide(
+                        alwaysOnScreen = true,
+                        alreadyHidden = true
+                    )
+                ) {
+                    // Already sleeping in the bezel: stay peacefully hidden when keyboard closes.
+                } else if (root.visibility != View.VISIBLE || isConcealing) {
+                    prepareCollapsedAwakeLayout()
+                    revealBubble(root)
+                    resetInactivityTimer(keepShrunk = false)
+                } else if (
+                    BubbleInteractionPolicy.shouldTuckImmediatelyOnKeyboardHide(
+                        alwaysOnScreen = true,
+                        alreadyHidden = overlayHalfTucked,
+                        isSessionOrTelescopeActive = false
+                    )
+                ) {
+                    // Keyboard closed before the 3s countdown finished: immediately glide & fade
+                    // smoothly back to the side bezel half-ring (never disappear, never wait 3s).
+                    mainHandler.removeCallbacks(shrinkRunnable)
+                    applyShrink()
+                }
             } else if (!isSessionActive) {
-                collapsePanel()
+                dismissTelescopeWorkspace()
+                mainHandler.removeCallbacks(shrinkRunnable)
+                dragSnapHandler.cancel()
+                wasHalfTuckedAtTouchDown = false
+                if (overlayExpanded.value) {
+                    collapsePanel()
+                }
                 concealBubble(root, BubbleHealthLog.HIDE_NO_IME_AFTER_SETTLE)
             } else {
                 setViewVisibilityImmediate(root, true, null)
@@ -778,8 +1205,8 @@ class FloatingOverlayWindowManager(private val context: Context) {
         }
         root.animate().cancel()
         root.alpha = 0f
-        root.scaleX = 0.92f
-        root.scaleY = 0.92f
+        root.scaleX = 0.82f
+        root.scaleY = 0.82f
         setViewVisibilityImmediate(root, true, null)
         root.post {
             if (root.isAttachedToWindow && root.visibility == View.VISIBLE) {
@@ -791,6 +1218,7 @@ class FloatingOverlayWindowManager(private val context: Context) {
             .scaleX(1f)
             .scaleY(1f)
             .setDuration(BUBBLE_ANIM_MS)
+            .setInterpolator(revealInterpolator)
             .setStartDelay(0L)
             .start()
     }
@@ -807,12 +1235,16 @@ class FloatingOverlayWindowManager(private val context: Context) {
         lastHideReason = hideReason
         root.animate()
             .alpha(0f)
-            .scaleX(0.92f)
-            .scaleY(0.92f)
-            .setDuration(BUBBLE_ANIM_MS)
+            .scaleX(0.85f)
+            .scaleY(0.85f)
+            .setDuration(BUBBLE_CONCEAL_MS)
+            .setInterpolator(concealInterpolator)
             .setStartDelay(0L)
             .withEndAction {
                 isConcealing = false
+                overlayHalfTucked = false
+                idleBubbleView?.setTuckProgress(0f)
+                syncIdleBubbleState()
                 setViewVisibilityImmediate(root, false, hideReason)
                 root.alpha = 1f
                 root.scaleX = 1f
@@ -843,7 +1275,12 @@ class FloatingOverlayWindowManager(private val context: Context) {
         mainHandler.post {
             val root = overlayView ?: return@post
             val repairActive = A11yWatchdog.repairKind.value != A11yRepairKind.NONE
-            if (isKeyboardOpen || repairActive || overlayRecording.value || overlayExpanded.value) {
+            if (isKeyboardOpen ||
+                FloatingBubbleManager.isAlwaysOnScreen.value ||
+                repairActive ||
+                overlayRecording.value ||
+                overlayExpanded.value
+            ) {
                 revealBubble(root)
             } else {
                 concealBubble(root, BubbleHealthLog.HIDE_NO_IME_AFTER_SETTLE)
@@ -853,9 +1290,10 @@ class FloatingOverlayWindowManager(private val context: Context) {
 
     fun updateOverlayVisibility(isSessionActive: Boolean) {
         val isKeyboardOpen = FloatingBubbleManager.isKeyboardVisible.value
+        val alwaysOn = FloatingBubbleManager.isAlwaysOnScreen.value
         val repairActive = A11yWatchdog.repairKind.value != A11yRepairKind.NONE
         val root = overlayView ?: return
-        if (!isSessionActive && !isKeyboardOpen && !repairActive) {
+        if (!isSessionActive && !isKeyboardOpen && !alwaysOn && !repairActive) {
             setViewVisibilityImmediate(root, false, BubbleHealthLog.HIDE_NO_IME_AFTER_SETTLE)
             BubbleHealthLog.cancelShowOpportunity(context, BubbleHealthLog.HIDE_NO_IME_AFTER_SETTLE)
         } else {
@@ -868,6 +1306,8 @@ class FloatingOverlayWindowManager(private val context: Context) {
 
     fun onDestroy() {
         cancelPendingAttachRetry()
+        dismissTelescopeWorkspace()
+        telescopeActionOverlay = null
         overlayBubbleVisible.value = false
         overlayScope?.cancel()
         overlayScope = null

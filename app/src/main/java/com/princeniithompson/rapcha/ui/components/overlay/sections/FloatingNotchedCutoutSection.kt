@@ -10,9 +10,9 @@ import com.princeniithompson.rapcha.ui.components.overlay.FloatingDockedLifebuoy
 import com.princeniithompson.rapcha.ui.components.overlay.NotchedContainerShape
 
 object FloatingNotchedDimensions {
-    val CornerRadius = 24.dp
-    val NotchRadius = 25.5.dp
-    val NotchCenterOffsetX = 28.dp
+    val CornerRadius = 22.dp
+    val NotchRadius = 22.5.dp
+    val NotchCenterOffsetX = 25.dp
     val NotchCenterOffsetY = 2.dp
     val FilletRadius = 8.dp
 }

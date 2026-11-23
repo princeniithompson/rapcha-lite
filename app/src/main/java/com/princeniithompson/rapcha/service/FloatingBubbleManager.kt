@@ -27,9 +27,13 @@ object FloatingBubbleManager {
     /** Saved activeContainer: "words" (original bubble) or "mini" (compact pill). Same key as v24. */
     const val KEY_BUBBLE_CHROME = "bubble_chrome_style"
     private const val KEY_BUBBLE_ENABLED = "bubble_enabled"
+    private const val KEY_ALWAYS_ON_SCREEN = "bubble_always_on_screen"
 
     private val _isBubbleEnabled = MutableStateFlow(false)
     val isBubbleEnabled: StateFlow<Boolean> = _isBubbleEnabled.asStateFlow()
+
+    private val _isAlwaysOnScreen = MutableStateFlow(false)
+    val isAlwaysOnScreen: StateFlow<Boolean> = _isAlwaysOnScreen.asStateFlow()
 
     private val _isAccessibilityConnected = MutableStateFlow(false)
     val isAccessibilityConnected: StateFlow<Boolean> = _isAccessibilityConnected.asStateFlow()
@@ -97,12 +101,21 @@ object FloatingBubbleManager {
     @Volatile
     private var initialized = false
 
+    /**
+     * Suppresses background/accessibility auto-starts of the system FloatingBubbleService while
+     * the user is inside Onboarding (so granting Overlay + Accessibility before interactive
+     * practice never spawns a second bubble on top of the practice UI).
+     */
+    @Volatile
+    var isOnboardingActive: Boolean = false
+
     private val EXPLICIT_START_SOURCES = setOf("user_enable", "action_show", "action_restore")
 
     fun init(context: Context) {
         if (initialized) return
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         _isBubbleEnabled.value = prefs.getBoolean(KEY_BUBBLE_ENABLED, false)
+        _isAlwaysOnScreen.value = prefs.getBoolean(KEY_ALWAYS_ON_SCREEN, false)
         loadBubbleChrome(context)
         initialized = true
         checkPermissions(context)
@@ -149,6 +162,27 @@ object FloatingBubbleManager {
         } catch (_: Throwable) {
             _isBubbleEnabled.value
         }
+    }
+
+    fun isAlwaysOnScreenSync(context: Context): Boolean {
+        if (initialized) return _isAlwaysOnScreen.value
+        return try {
+            val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val stored = prefs.getBoolean(KEY_ALWAYS_ON_SCREEN, false)
+            _isAlwaysOnScreen.value = stored
+            stored
+        } catch (_: Throwable) {
+            _isAlwaysOnScreen.value
+        }
+    }
+
+    fun setAlwaysOnScreen(context: Context, enabled: Boolean) {
+        _isAlwaysOnScreen.value = enabled
+        context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_ALWAYS_ON_SCREEN, enabled)
+            .apply()
+        FloatingBubbleService.instance?.onAlwaysOnScreenChanged(enabled)
     }
 
     fun startEnabledBubble(context: Context, source: String = "start_enabled") {
@@ -238,6 +272,10 @@ object FloatingBubbleManager {
 
     fun startBubbleService(context: Context, source: String = "manual", bypassThrottle: Boolean = false): Boolean {
         val app = context.applicationContext ?: context
+        if (isOnboardingActive && source != "user_enable") {
+            Log.d(TAG, "Suppressing startBubbleService(source=$source) while onboarding is active")
+            return false
+        }
         if (!canDrawOverlays(app)) {
             com.princeniithompson.rapcha.diagnostics.BubbleHealthLog.recordHideReason(
                 app,

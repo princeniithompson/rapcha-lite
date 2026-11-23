@@ -12,7 +12,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -36,10 +36,10 @@ import com.princeniithompson.rapcha.ui.components.overlay.sections.rememberFloat
 import com.princeniithompson.rapcha.ui.components.overlay.sections.rememberNotchedContainerShape
 
 /**
- * Floating Dictation Popup coordinating modular UI sections:
+ * Compact 2-row Floating Dictation Popup coordinating modular UI sections:
  * - Dynamic Aurora Glow bloom diffused within the notched frosted-glass container
- * - Left-aligned text input area with auto-scrolling & blinking cursor
- * - Action button row (Cancel | Complete; Polish only in the onboarding demo)
+ * - Fixed-height 2-line (Option A, ~101dp) or 1-line (Option B, ~83dp) auto-scrolling transcript
+ * - Unified bottom bar with Cancel, inline live session timer (center or left), and Complete
  * - Docked lifebuoy ring nested unclipped in the top-right cutout notch
  */
 @Composable
@@ -67,7 +67,9 @@ fun FloatingDictationPopup(
     bubbleVisible: Boolean = true,
     lowPower: Boolean = false,
     /** v26: the live bubble hides Polish (Smart polish is a Settings switch). The onboarding demo shows it. */
-    showPolish: Boolean = false
+    showPolish: Boolean = false,
+    /** Elapsed seconds in the active dictation session (displayed in tabular numerals). */
+    elapsedSeconds: Int = 0
 ) {
     val isNetworkProblem by com.princeniithompson.rapcha.service.FloatingBubbleManager.isNetworkProblem.collectAsState()
     val basePalette = rememberDynamicAuroraPaletteFromOverlay()
@@ -101,7 +103,7 @@ fun FloatingDictationPopup(
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(96.dp)
+                        .height(80.dp)
                 ) {
                     Row(
                         modifier = Modifier
@@ -112,22 +114,22 @@ fun FloatingDictationPopup(
                     ) {
                         PillActionButton(
                             onClick = onCancelClick,
-                            backgroundColor = Color(0x381E1E24),
-                            borderColor = Color(0x26FF5252),
+                            backgroundColor = Color(0x5C0E1417),
+                            borderColor = Color(0x30FFFFFF),
                             modifier = Modifier.weight(1f)
                         ) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Icon(
-                                    imageVector = Icons.Filled.Close,
+                                    imageVector = Icons.Rounded.Close,
                                     contentDescription = null,
-                                    tint = Color(0xFFFF5252),
-                                    modifier = Modifier.size(15.dp)
+                                    tint = Color(0xFFFF8A80),
+                                    modifier = Modifier.size(14.dp)
                                 )
-                                Spacer(modifier = Modifier.width(5.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
                                 Text(
                                     text = "Cancel",
-                                    color = Color(0xFFFF7B7B),
-                                    fontSize = 13.5.sp,
+                                    color = Color(0xFFF1F5F9),
+                                    fontSize = 12.5.sp,
                                     fontWeight = FontWeight.Medium
                                 )
                             }
@@ -136,16 +138,16 @@ fun FloatingDictationPopup(
                         PillActionButton(
                             onClick = onPolishClick,
                             backgroundColor = palette.primaryVibrant,
-                            borderColor = Color.Transparent,
+                            borderColor = Color(0x36FFFFFF),
                             modifier = Modifier.weight(1.4f)
                         ) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text(text = "✦", color = polishInk, fontSize = 14.sp, fontWeight = FontWeight.Bold)
-                                Spacer(modifier = Modifier.width(5.dp))
+                                Text(text = "✦", color = polishInk, fontSize = 13.5.sp, fontWeight = FontWeight.Bold)
+                                Spacer(modifier = Modifier.width(4.dp))
                                 Text(
                                     text = "Polish",
                                     color = polishInk,
-                                    fontSize = 13.5.sp,
+                                    fontSize = 12.5.sp,
                                     fontWeight = FontWeight.SemiBold
                                 )
                             }
@@ -153,31 +155,33 @@ fun FloatingDictationPopup(
                     }
                 }
             } else {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .wrapContentHeight()
-            ) {
-                // Transcript text input box with scrolling & cursor
-                FloatingTranscriptSection(
-                    transcriptText = transcriptText,
-                    cursorAlphaProvider = state.cursorAlphaProvider,
-                    palette = palette,
-                    scrollState = state.scrollState
-                )
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .wrapContentHeight()
+                ) {
+                    // Row 1: Fixed 2-line (38.dp) live transcript with movie-credits upward roll
+                    FloatingTranscriptSection(
+                        transcriptText = transcriptText,
+                        cursorAlphaProvider = state.cursorAlphaProvider,
+                        palette = palette,
+                        scrollState = state.scrollState
+                    )
 
-                Spacer(modifier = Modifier.height(12.dp))
+                    Spacer(modifier = Modifier.height(9.dp))
 
-                // Action button row (Cancel | Polish | Complete)
-                FloatingButtonRowSection(
-                    state = state,
-                    palette = palette,
-                    onCancelClick = onCancelClick,
-                    onPolishClick = onPolishClick,
-                    onCompleteClick = onCompleteClick,
-                    showPolish = showPolish
-                )
-            }
+                    // Row 2: Action & Standalone Center Timer Bar (34.dp)
+                    FloatingButtonRowSection(
+                        state = state,
+                        palette = palette,
+                        onCancelClick = onCancelClick,
+                        onPolishClick = onPolishClick,
+                        onCompleteClick = onCompleteClick,
+                        showPolish = showPolish,
+                        elapsedSeconds = elapsedSeconds,
+                        isNetworkProblem = isNetworkProblem
+                    )
+                }
             }
         }
 

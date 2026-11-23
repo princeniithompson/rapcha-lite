@@ -76,9 +76,12 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.compose.runtime.collectAsState
+import com.princeniithompson.rapcha.data.CustomVocabularyRepository
 import com.princeniithompson.rapcha.data.DictationStats
 import com.princeniithompson.rapcha.data.RecentDictations
 import com.princeniithompson.rapcha.service.floating.BubbleChromeStyle
+import com.princeniithompson.rapcha.service.floating.FloatingNotificationManager
 import com.princeniithompson.rapcha.service.floating.HomeCarouselPolicy
 import com.princeniithompson.rapcha.ui.components.FloatingDictationPopup
 import com.princeniithompson.rapcha.ui.components.overlay.CompactRecordingBar
@@ -112,11 +115,13 @@ fun HomeScreen(
     initialPage: Int = HomeCarouselPolicy.PAGE_WORDS_BUBBLE,
     apiKeyMissingOrInvalid: Boolean = false,
     isProvisioningKey: Boolean = false,
-    onConnectApiKey: () -> Unit = {}
+    onConnectApiKey: () -> Unit = {},
+    onOpenVoiceReview: (String?) -> Unit = {}
 ) {
     val context = LocalContext.current
     val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
     val groupedHistory = remember(recentItems) { recentItems.groupBy { it.dateHeader() } }
+    val pendingCandidates by CustomVocabularyRepository.pendingCandidates.collectAsState()
 
     Column(
         modifier = modifier
@@ -306,6 +311,73 @@ fun HomeScreen(
                 Spacer(modifier = Modifier.height(20.dp))
             }
 
+            // Pending Voice-First Learning Card (shown right above Today when a new word/shortcut is detected)
+            val firstPending = pendingCandidates.firstOrNull()
+            if (firstPending != null) {
+                item(key = "pending_vocab_${firstPending.id}") {
+                    Card(
+                        shape = RoundedCornerShape(20.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.65f)
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 20.dp, vertical = 6.dp)
+                            .testTag("home_pending_candidate_card")
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(16.dp)
+                        ) {
+                            Text(
+                                text = firstPending.spokenPrompt,
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                            )
+                            Spacer(modifier = Modifier.height(10.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                androidx.compose.material3.Button(
+                                    onClick = {
+                                        CustomVocabularyRepository.approveCandidate(firstPending.id)
+                                        FloatingNotificationManager.cancelVocabularyNotification(context)
+                                    },
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .testTag("home_pending_candidate_yes")
+                                ) {
+                                    Text("Yes", fontWeight = FontWeight.Bold)
+                                }
+                                androidx.compose.material3.OutlinedButton(
+                                    onClick = {
+                                        CustomVocabularyRepository.rejectCandidate(firstPending.id)
+                                        FloatingNotificationManager.cancelVocabularyNotification(context)
+                                    },
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .testTag("home_pending_candidate_no")
+                                ) {
+                                    Text("No", fontWeight = FontWeight.Bold)
+                                }
+                                FilledTonalButton(
+                                    onClick = { onOpenVoiceReview(firstPending.id) },
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .testTag("home_pending_candidate_edit")
+                                ) {
+                                    Text("Edit", fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(10.dp))
+                }
+            }
+
             // Day-grouped list of this session's dictations (memory only)
             if (groupedHistory.isEmpty()) {
                 item {
@@ -318,7 +390,7 @@ fun HomeScreen(
                         Text(
                             text = "No dictations yet",
                             style = MaterialTheme.typography.bodyMedium,
-                            color = if (isDark) Color(0xFF94A3B8) else Color(0xFF718096),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                             textAlign = TextAlign.Center,
                             modifier = Modifier
                                 .padding(horizontal = 32.dp)
@@ -334,7 +406,7 @@ fun HomeScreen(
                             fontSize = 28.sp,
                             fontFamily = FontFamily.Serif,
                             fontWeight = FontWeight.Normal,
-                            color = if (isDark) Color(0xFFF1F5F9) else Color(0xFF1A202C),
+                            color = MaterialTheme.colorScheme.onBackground,
                             modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp)
                         )
                     }
@@ -452,7 +524,7 @@ private fun TopCarouselSection(
                     )
                     HomeCarouselPolicy.PAGE_WORDS_SPOKEN -> StatCardView(
                         statNumber = "$formattedWords words",
-                        statColor = Color(0xFF0F766E),
+                        statColor = MaterialTheme.colorScheme.primary,
                         description = if (totals.words > 0) {
                             "spoken so far across your dictation sessions"
                         } else {
@@ -463,7 +535,7 @@ private fun TopCarouselSection(
                     )
                     HomeCarouselPolicy.PAGE_WPM -> StatCardView(
                         statNumber = "$wpm wpm",
-                        statColor = Color(0xFF0D9488),
+                        statColor = MaterialTheme.colorScheme.tertiary,
                         description = if (wpm > 0) {
                             "This is your words per minute speaking speed"
                         } else {
@@ -538,11 +610,11 @@ private fun BubbleChoicePage(
         // v27: same card as the stats pages (white in light mode, no border); the active
         // bubble keeps its primary outline so the choice stays visible.
         colors = CardDefaults.cardColors(
-            containerColor = if (isDark) Color(0xFF16151F) else Color.White
+            containerColor = if (isDark) MaterialTheme.colorScheme.surfaceContainer else MaterialTheme.colorScheme.surfaceContainerLowest
         ),
         border = when {
-            active -> BorderStroke(2.dp, MaterialTheme.colorScheme.primary)
-            isDark -> BorderStroke(1.dp, Color(0xFF262433))
+            active -> BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary)
+            isDark -> BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
             else -> null
         },
         elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
@@ -556,7 +628,7 @@ private fun BubbleChoicePage(
             ) {
                 Text(
                     text = title,
-                    color = if (isDark) Color(0xFFF1F5F9) else Color(0xFF1A202C),
+                    color = MaterialTheme.colorScheme.onSurface,
                     fontSize = 16.sp,
                     fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.weight(1f)
@@ -597,7 +669,7 @@ private fun BubbleChoicePage(
             }
             Text(
                 text = caption,
-                color = if (isDark) Color(0xFFCBD5E1) else Color(0xFF4A5568),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontSize = 12.5.sp,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
@@ -627,10 +699,11 @@ private fun BubbleChoicePage(
                         Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
                             if (style == BubbleChromeStyle.ORIGINAL) {
                                 FloatingDictationPopup(
-                                    transcriptText = "Hey, I'm on my way. See you in ten minutes",
+                                    transcriptText = "Hey, I'm on my way. See you in ten minutes with the notes ready.",
                                     isRecording = true,
                                     isPendingFinalizing = false,
                                     isPolishing = false,
+                                    elapsedSeconds = 12,
                                     audioAmplitude = 0f,
                                     mimicTalkingWhenSilent = true,
                                     bubbleVisible = animating,
@@ -676,9 +749,9 @@ private fun StatCardView(
             .testTag("stats_card_$pageIndex"),
         shape = RoundedCornerShape(26.dp),
         colors = CardDefaults.cardColors(
-            containerColor = if (isDark) Color(0xFF16151F) else Color.White
+            containerColor = if (isDark) MaterialTheme.colorScheme.surfaceContainer else MaterialTheme.colorScheme.surfaceContainerLowest
         ),
-        border = if (isDark) BorderStroke(1.dp, Color(0xFF262433)) else null,
+        border = if (isDark) BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant) else null,
         elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
     ) {
         Column(
@@ -701,7 +774,7 @@ private fun StatCardView(
                 text = description,
                 fontSize = 14.5.sp,
                 fontWeight = FontWeight.Normal,
-                color = if (isDark) Color(0xFFCBD5E1) else Color(0xFF4A5568),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center,
                 lineHeight = 20.sp
             )
@@ -727,9 +800,9 @@ private fun HistoryCardItem(
             .testTag("history_card_${item.id}"),
         shape = RoundedCornerShape(24.dp),
         colors = CardDefaults.cardColors(
-            containerColor = if (isDark) Color(0xFF16151F) else Color.White
+            containerColor = if (isDark) MaterialTheme.colorScheme.surfaceContainer else MaterialTheme.colorScheme.surfaceContainerLowest
         ),
-        border = if (isDark) BorderStroke(1.dp, Color(0xFF262433)) else null,
+        border = if (isDark) BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant) else null,
         elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
     ) {
         Column(
@@ -742,13 +815,13 @@ private fun HistoryCardItem(
                 fontSize = 15.sp,
                 lineHeight = 22.sp,
                 fontWeight = FontWeight.Normal,
-                color = if (isDark) Color(0xFFF8FAFC) else Color(0xFF1A202C)
+                color = MaterialTheme.colorScheme.onSurface
             )
             Spacer(modifier = Modifier.height(12.dp))
             Text(
                 text = item.formattedTime(),
                 fontSize = 12.sp,
-                color = if (isDark) Color(0xFF94A3B8) else Color(0xFF718096),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontWeight = FontWeight.Medium
             )
             Spacer(modifier = Modifier.height(12.dp))
@@ -757,8 +830,8 @@ private fun HistoryCardItem(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                val btnBg = if (isDark) Color(0xFF232230) else Color(0xFFF1F5F9)
-                val btnInk = if (isDark) Color(0xFFE2E8F0) else Color(0xFF334155)
+                val btnBg = MaterialTheme.colorScheme.surfaceContainerHigh
+                val btnInk = MaterialTheme.colorScheme.onSurfaceVariant
                 HistoryPill(Icons.Filled.ContentCopy, "Copy", btnBg, btnInk, onCopy)
                 HistoryPill(Icons.Filled.Share, "Share", btnBg, btnInk, onShare)
                 Spacer(modifier = Modifier.weight(1f))
@@ -767,7 +840,7 @@ private fun HistoryCardItem(
                         Icon(
                             imageVector = Icons.Filled.MoreVert,
                             contentDescription = "More options",
-                            tint = Color(0xFF94A3B8),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.size(18.dp)
                         )
                     }

@@ -56,7 +56,7 @@ fun FloatingDockedLifebuoy(
     Box(
         modifier = modifier
             .padding(end = 4.dp)
-            .size(48.dp)
+            .size(42.dp)
             .clip(CircleShape)
             .pointerInput(Unit) {
                 detectDragGestures(
@@ -80,7 +80,7 @@ fun FloatingDockedLifebuoy(
             painter = painterResource(id = R.drawable.ic_lifebuoy_ring),
             contentDescription = "Lifebuoy voice typing",
             modifier = Modifier
-                .size(46.dp)
+                .size(40.dp)
                 .graphicsLayer { if (spinning) rotationZ = spin() }
         )
     }
