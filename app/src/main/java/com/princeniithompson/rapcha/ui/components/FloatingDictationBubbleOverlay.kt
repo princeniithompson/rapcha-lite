@@ -69,19 +69,23 @@ fun FloatingDictationPopup(
     /** v26: the live bubble hides Polish (Smart polish is a Settings switch). The onboarding demo shows it. */
     showPolish: Boolean = false,
     /** Elapsed seconds in the active dictation session (displayed in tabular numerals). */
-    elapsedSeconds: Int = 0
+    elapsedSeconds: Int = 0,
+    /** Home-screen card preview mode: static picture, zero infinite loops, mock-only button press effect. */
+    staticPreview: Boolean = false
 ) {
-    val isNetworkProblem by com.princeniithompson.rapcha.service.FloatingBubbleManager.isNetworkProblem.collectAsState()
+    val liveNetworkProblem by com.princeniithompson.rapcha.service.FloatingBubbleManager.isNetworkProblem.collectAsState()
+    val isNetworkProblem = if (staticPreview) false else liveNetworkProblem
+    val effectiveBubbleVisible = if (staticPreview) false else bubbleVisible
     val basePalette = rememberDynamicAuroraPaletteFromOverlay()
     val palette = if (isNetworkProblem) basePalette.toDangerPalette() else basePalette
     val state = rememberFloatingDictationPopupState(
         transcriptText = transcriptText,
         isRecording = isRecording,
-        isPendingFinalizing = isPendingFinalizing,
-        isPolishing = isPolishing,
+        isPendingFinalizing = if (staticPreview) false else isPendingFinalizing,
+        isPolishing = if (staticPreview) false else isPolishing,
         audioAmplitude = audioAmplitude,
         mimicTalkingWhenSilent = mimicTalkingWhenSilent,
-        bubbleVisible = bubbleVisible,
+        bubbleVisible = effectiveBubbleVisible,
         lowPower = lowPower
     )
     val notchedShape = rememberNotchedContainerShape()
@@ -163,9 +167,10 @@ fun FloatingDictationPopup(
                     // Row 1: Fixed 2-line (38.dp) live transcript with movie-credits upward roll
                     FloatingTranscriptSection(
                         transcriptText = transcriptText,
-                        cursorAlphaProvider = state.cursorAlphaProvider,
+                        cursorAlphaProvider = if (staticPreview) ({ 1f }) else state.cursorAlphaProvider,
                         palette = palette,
-                        scrollState = state.scrollState
+                        scrollState = state.scrollState,
+                        staticPreview = staticPreview
                     )
 
                     Spacer(modifier = Modifier.height(9.dp))
@@ -179,7 +184,8 @@ fun FloatingDictationPopup(
                         onCompleteClick = onCompleteClick,
                         showPolish = showPolish,
                         elapsedSeconds = elapsedSeconds,
-                        isNetworkProblem = isNetworkProblem
+                        isNetworkProblem = isNetworkProblem,
+                        staticPreview = staticPreview
                     )
                 }
             }
@@ -191,8 +197,9 @@ fun FloatingDictationPopup(
             onDragStart = onDragStart,
             onDrag = onDrag,
             onDragEnd = onDragEnd,
-            spinning = state.isFinalizing || state.isPolishing,
-            bubbleVisible = bubbleVisible,
+            spinning = if (staticPreview) false else (state.isFinalizing || state.isPolishing),
+            bubbleVisible = effectiveBubbleVisible,
+            staticPreview = staticPreview,
             modifier = Modifier.align(Alignment.TopEnd)
         )
     }

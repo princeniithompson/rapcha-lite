@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.CloudOff
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Schedule
 import androidx.compose.material3.CircularProgressIndicator
@@ -43,9 +44,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -182,17 +185,6 @@ fun DrawerStandaloneUsageSection(
         MaterialTheme.colorScheme.outlineVariant
     }
 
-    val modulesTitle = if (snapshot.isConfirmedPaid) {
-        "Your daily modules usage"
-    } else {
-        "Your free modules usage"
-    }
-    val offlineTitle = if (snapshot.isConfirmedPaid) {
-        "Your daily offline usage"
-    } else {
-        "Your free offline usage"
-    }
-
     Column(
         modifier = modifier
             .fillMaxWidth()
@@ -203,7 +195,8 @@ fun DrawerStandaloneUsageSection(
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         StandaloneUsageLine(
-            label = modulesTitle,
+            icon = RapchaIcons.Modules,
+            label = "Modules",
             progress = snapshot.modulesProgress,
             rateLimited = snapshot.modulesRateLimited,
             unlimitedOrOverflow = snapshot.modulesUnlimited || snapshot.modulesPaidOverflow,
@@ -211,7 +204,8 @@ fun DrawerStandaloneUsageSection(
             testTag = "usage_bar_modules"
         )
         StandaloneUsageLine(
-            label = offlineTitle,
+            icon = Icons.Rounded.CloudOff,
+            label = "Offline",
             progress = snapshot.offlineProgress,
             rateLimited = snapshot.offlineRateLimited,
             unlimitedOrOverflow = snapshot.offlineUnlimited || snapshot.offlinePaidOverflow,
@@ -223,6 +217,7 @@ fun DrawerStandaloneUsageSection(
 
 @Composable
 private fun StandaloneUsageLine(
+    icon: ImageVector,
     label: String,
     progress: Float,
     rateLimited: Boolean,
@@ -257,14 +252,27 @@ private fun StandaloneUsageLine(
             .testTag(testTag),
         verticalArrangement = Arrangement.spacedBy(7.dp)
     ) {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.bodyMedium,
-            fontWeight = FontWeight.Medium,
-            color = MaterialTheme.colorScheme.onBackground,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis
-        )
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(16.dp)
+            )
+            Text(
+                text = label,
+                fontSize = 16.sp,
+                lineHeight = 24.sp,
+                fontWeight = FontWeight.Medium,
+                color = MaterialTheme.colorScheme.onBackground,
+                textAlign = TextAlign.Start,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
         Box(
             modifier = Modifier
                 .fillMaxWidth()

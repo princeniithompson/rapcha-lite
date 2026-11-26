@@ -41,6 +41,7 @@ fun FloatingTranscriptBox(
     cursorAlphaProvider: () -> Float,
     palette: AuroraColorPalette,
     scrollState: ScrollState,
+    staticPreview: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     Box(
@@ -48,7 +49,7 @@ fun FloatingTranscriptBox(
             .fillMaxWidth()
             .height(38.dp) // Exactly 2 crisp lines at 19.sp lineHeight
             .padding(end = 42.dp) // Clears the docked top-right lifebuoy notch cleanly
-            .verticalScroll(scrollState),
+            .verticalScroll(scrollState, enabled = !staticPreview),
         contentAlignment = Alignment.TopStart
     ) {
         if (transcriptText.isBlank()) {

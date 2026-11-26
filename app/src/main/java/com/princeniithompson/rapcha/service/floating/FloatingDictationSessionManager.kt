@@ -16,6 +16,10 @@ import com.princeniithompson.rapcha.audio.SessionAudioBackup
 import com.princeniithompson.rapcha.data.ConnectionState
 import com.princeniithompson.rapcha.data.CustomVocabularyRepository
 import com.princeniithompson.rapcha.data.DiagnosticSource
+import com.princeniithompson.rapcha.diagnostics.DictationFallbackReason
+import com.princeniithompson.rapcha.diagnostics.DictationSessionOutcome
+import com.princeniithompson.rapcha.diagnostics.DictationTelemetryEvent
+import com.princeniithompson.rapcha.diagnostics.DictationTelemetryRepository
 import com.princeniithompson.rapcha.service.FloatingBubbleManager
 import com.princeniithompson.rapcha.websocket.DictationPiecePlanner
 import com.princeniithompson.rapcha.websocket.DictationSessionClock
@@ -369,19 +373,29 @@ class FloatingDictationSessionManager(
 
         return try {
             val backupHasSpeech = audioBackup.hasSpeech
+            val backupRmsMean = audioBackup.rmsMean.toInt()
+            val backupRmsMax = audioBackup.rmsMax.toInt()
             val networkUp = isNetworkAvailableNow()
+            val networkType = currentNetworkTypeLabel()
+            val socketStateAtComplete = ws?.currentSocketStateLabel ?: "null"
+            val splitInProgressAtComplete = ws?.isSplittingNow == true
+            val wsReconnectingAtComplete = ws?.isReconnecting == true
+            val wsReconnectCount = ws?.totalReconnectAttemptsInSession ?: 0
             var liveText = ""
             var liveHealthy = false
+            var hadPreviewAtComplete = (ws?.hasReceivedLivePreview == true) || interimSnapshot.isNotEmpty()
+            var liveTimeoutBudgetMs = 0L
             val liveEligible = ws != null && ws.isLiveStreamHealthyForFinalize && networkUp
             if (liveEligible) {
                 withContext(Dispatchers.IO) { sender.flush(LiveSink(ws)) }
-                val hasPreview = ws.hasReceivedLivePreview || interimSnapshot.isNotEmpty()
+                hadPreviewAtComplete = ws.hasReceivedLivePreview || interimSnapshot.isNotEmpty()
                 val finalTimeout = GeminiLiveWebSocketClient.computeLiveFinalizeTimeoutMs(
                     recordingSeconds = durationSeconds,
                     smartMode = activeSmartMode,
-                    hasLivePreview = hasPreview,
+                    hasLivePreview = hadPreviewAtComplete,
                     hasLocalBackup = backupHasSpeech
                 )
+                liveTimeoutBudgetMs = finalTimeout
                 liveText = ws.endActivityAndAwaitFinal(timeoutMs = finalTimeout).trim()
                 liveHealthy = !ws.endpointTimedOut && ws.finalSettledFromServer && liveText.isNotEmpty()
             } else if (ws != null && backupHasSpeech) {
@@ -391,9 +405,24 @@ class FloatingDictationSessionManager(
                 )
             }
             val afterLiveAt = SystemClock.elapsedRealtime()
+            // Snapshot Live finalize flags BEFORE ws.disconnect() so explicit cleanup can never
+            // alter disconnect/timeout/queue telemetry.
+            val wsDroppedAsNearSilent = ws?.lastPieceDroppedAsNearSilent == true
+            val wsDisconnectedDuringFinalize = ws?.wasDisconnectedDuringFinalize == true
+            val wsEndpointTimedOut = ws?.endpointTimedOut == true
+            val wsQueueAtEndBytes = ws?.wsQueueBytesAtActivityEnd ?: 0L
+            val wsQueueAtDoneBytes = ws?.wsQueueBytesAtFinalizeDone ?: 0L
+            val wsLastInterimAgeMs = ws?.lastInterimAgeAtEndMs ?: -1L
+            val wsPostEndFrames = ws?.postEndFramesSummary ?: "none"
 
             var finalText = liveText
             var usedBatchFallback = false
+            var encodeMs = 0L
+            var batchMs = 0L
+            var batchMime = "none"
+            var batchBytes = 0
+            var batchHttpCode = 0
+            var batchAttempts = 0
             if (!liveHealthy && backupHasSpeech && networkUp) {
                 Log.i(
                     TAG,
@@ -403,16 +432,25 @@ class FloatingDictationSessionManager(
                     ws?.disconnect()
                 } catch (_: Exception) {
                 }
+                val encodeStartAt = SystemClock.elapsedRealtime()
                 val exported = withContext(Dispatchers.IO) { audioBackup.exportForFallback() }
+                encodeMs = (SystemClock.elapsedRealtime() - encodeStartAt).coerceAtLeast(0L)
                 if (exported != null) {
+                    batchMime = exported.mimeType
+                    batchBytes = exported.bytes.size
                     val topVocab = CustomVocabularyRepository.getTopVocabularyForGemini()
-                    val fallbackText = GeminiBatchTranscribeClient.transcribe(
+                    val batchStartAt = SystemClock.elapsedRealtime()
+                    val batchResult = GeminiBatchTranscribeClient.transcribeDetailed(
                         apiKey = activeApiKey,
                         audioBytes = exported.bytes,
                         mimeType = exported.mimeType,
                         smartMode = activeSmartMode,
                         customVocabulary = topVocab
-                    )?.trim().orEmpty()
+                    )
+                    batchMs = (SystemClock.elapsedRealtime() - batchStartAt).coerceAtLeast(0L)
+                    batchHttpCode = batchResult.lastHttpCode
+                    batchAttempts = batchResult.attempts
+                    val fallbackText = batchResult.text?.trim().orEmpty()
                     if (fallbackText.isNotEmpty()) {
                         finalText = fallbackText
                         usedBatchFallback = true
@@ -441,6 +479,60 @@ class FloatingDictationSessionManager(
             }
             interimTranscript = ""
             val text = getFullTranscriptText().ifBlank { finalText }
+
+            val outcome = when {
+                liveHealthy -> DictationSessionOutcome.LIVE_OK
+                usedBatchFallback -> DictationSessionOutcome.BATCH_FALLBACK
+                text.isNotEmpty() -> DictationSessionOutcome.EMERGENCY_INTERIM
+                !backupHasSpeech -> DictationSessionOutcome.SILENT_SKIPPED
+                else -> DictationSessionOutcome.EMPTY_RESULT
+            }
+            val reason = when {
+                liveHealthy -> DictationFallbackReason.NONE_LIVE_OK
+                !backupHasSpeech && text.isEmpty() -> DictationFallbackReason.NO_SPEECH_IN_BACKUP
+                !networkUp -> DictationFallbackReason.NETWORK_OFFLINE_AT_COMPLETE
+                !liveEligible -> when {
+                    wsReconnectingAtComplete -> DictationFallbackReason.SOCKET_RECONNECTING_AT_COMPLETE
+                    else -> DictationFallbackReason.SOCKET_NOT_READY_AT_COMPLETE
+                }
+                wsDroppedAsNearSilent -> DictationFallbackReason.LIVE_SILENCE_GATE_DROPPED
+                wsDisconnectedDuringFinalize -> DictationFallbackReason.LIVE_DISCONNECTED_DURING_FINALIZE
+                splitInProgressAtComplete && wsEndpointTimedOut -> DictationFallbackReason.SPLIT_COLLISION_AT_COMPLETE
+                wsEndpointTimedOut && hadPreviewAtComplete -> DictationFallbackReason.LIVE_TIMEOUT_WITH_PREVIEW
+                wsEndpointTimedOut -> DictationFallbackReason.LIVE_TIMEOUT_NO_PREVIEW
+                else -> DictationFallbackReason.LIVE_EMPTY_SERVER_RESPONSE
+            }
+            DictationTelemetryRepository.recordSession(
+                context = context,
+                event = DictationTelemetryEvent(
+                    timestampMs = System.currentTimeMillis(),
+                    outcome = outcome,
+                    reason = reason,
+                    audioSec = durationSeconds,
+                    smartMode = activeSmartMode,
+                    tailMs = (afterTailAt - finishStartedAt).coerceAtLeast(0L),
+                    liveMs = (afterLiveAt - afterTailAt).coerceAtLeast(0L),
+                    liveTimeoutBudgetMs = liveTimeoutBudgetMs,
+                    encodeMs = encodeMs,
+                    batchMs = batchMs,
+                    totalMs = (afterFallbackAt - finishStartedAt).coerceAtLeast(0L),
+                    hadPreview = hadPreviewAtComplete,
+                    socketState = socketStateAtComplete,
+                    wsReconnects = wsReconnectCount,
+                    rmsMean = backupRmsMean,
+                    rmsMax = backupRmsMax,
+                    batchMime = batchMime,
+                    batchBytes = batchBytes,
+                    batchHttpCode = batchHttpCode,
+                    batchAttempts = batchAttempts,
+                    networkType = networkType,
+                    wsQueueAtEndBytes = wsQueueAtEndBytes,
+                    wsQueueAtDoneBytes = wsQueueAtDoneBytes,
+                    lastInterimAgeMs = wsLastInterimAgeMs,
+                    postEndFrames = wsPostEndFrames
+                )
+            )
+
             Log.i(
                 TAG,
                 "Complete timing: tail_ms=${afterTailAt - finishStartedAt} live_ms=${afterLiveAt - afterTailAt} " +
@@ -557,6 +649,30 @@ class FloatingDictationSessionManager(
             }
         } catch (_: Throwable) {
             true
+        }
+    }
+
+    private fun currentNetworkTypeLabel(): String {
+        return try {
+            val cm = context.applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+                ?: return "UNKNOWN"
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                val network = cm.activeNetwork ?: return "NONE"
+                val caps = cm.getNetworkCapabilities(network) ?: return "NONE"
+                when {
+                    caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "WIFI"
+                    caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "CELLULAR"
+                    caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "ETHERNET"
+                    caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) -> "OTHER"
+                    else -> "NONE"
+                }
+            } else {
+                @Suppress("DEPRECATION")
+                val info = cm.activeNetworkInfo
+                if (info == null || !info.isConnected) "NONE" else info.typeName.uppercase(java.util.Locale.US)
+            }
+        } catch (_: Throwable) {
+            "UNKNOWN"
         }
     }
 

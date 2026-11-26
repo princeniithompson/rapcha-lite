@@ -51,7 +51,6 @@ import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Spellcheck
 import androidx.compose.material.icons.filled.Translate
-import androidx.compose.material.icons.rounded.AutoFixHigh
 import androidx.compose.material.icons.rounded.RecordVoiceOver
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -92,6 +91,7 @@ import com.princeniithompson.rapcha.data.TextActionRequest
 import com.princeniithompson.rapcha.data.TextActionResult
 import com.princeniithompson.rapcha.data.ToneItem
 import com.princeniithompson.rapcha.data.ToneRepository
+import com.princeniithompson.rapcha.ui.components.RapchaIcons
 import com.princeniithompson.rapcha.ui.screens.CuratedIconCatalog
 import com.princeniithompson.rapcha.ui.screens.ItemBadgeGlyph
 import com.princeniithompson.rapcha.ui.theme.MyApplicationTheme
@@ -511,7 +511,7 @@ private fun builtInModuleIconFor(moduleId: String): ImageVector = when (moduleId
     ToneRepository.MODULE_TRANSLATE -> Icons.Filled.Translate
     ToneRepository.MODULE_REPLY -> Icons.AutoMirrored.Filled.Reply
     ToneRepository.MODULE_TONE -> Icons.Rounded.RecordVoiceOver
-    else -> Icons.Rounded.AutoFixHigh
+    else -> RapchaIcons.Modules
 }
 
 @Composable

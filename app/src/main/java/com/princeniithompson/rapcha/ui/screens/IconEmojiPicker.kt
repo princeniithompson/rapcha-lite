@@ -25,7 +25,6 @@ import androidx.compose.material.icons.automirrored.filled.Reply
 import androidx.compose.material.icons.filled.Spellcheck
 import androidx.compose.material.icons.filled.Translate
 import androidx.compose.material.icons.rounded.AutoAwesome
-import androidx.compose.material.icons.rounded.AutoFixHigh
 import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.Campaign
 import androidx.compose.material.icons.rounded.ChatBubbleOutline
@@ -42,6 +41,7 @@ import androidx.compose.material.icons.rounded.Star
 import androidx.compose.material.icons.rounded.Subject
 import androidx.compose.material.icons.rounded.WorkOutline
 import com.princeniithompson.rapcha.data.ToneRepository
+import com.princeniithompson.rapcha.ui.components.RapchaIcons
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -100,7 +100,7 @@ object CuratedIconCatalog {
 
     val VECTOR_ICONS: List<CuratedIconOption> = listOf(
         CuratedIconOption("record_voice_over", "Speak", Icons.Rounded.RecordVoiceOver),
-        CuratedIconOption("auto_fix", "Magic", Icons.Rounded.AutoFixHigh),
+        CuratedIconOption("auto_fix", "Modules", RapchaIcons.Modules),
         CuratedIconOption("auto_awesome", "Sparkle", Icons.Rounded.AutoAwesome),
         CuratedIconOption("edit", "Edit", Icons.Rounded.Edit),
         CuratedIconOption("translate", "Translate", Icons.Filled.Translate),

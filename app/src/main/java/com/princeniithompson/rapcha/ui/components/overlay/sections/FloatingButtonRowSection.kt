@@ -18,16 +18,19 @@ fun FloatingButtonRowSection(
     modifier: Modifier = Modifier,
     showPolish: Boolean = false,
     elapsedSeconds: Int = 0,
-    isNetworkProblem: Boolean = false
+    isNetworkProblem: Boolean = false,
+    staticPreview: Boolean = false
 ) {
     FloatingActionRow(
-        isFinalizing = state.isFinalizing,
-        isPolishing = state.isPolishing,
+        isFinalizing = if (staticPreview) false else state.isFinalizing,
+        isPolishing = if (staticPreview) false else state.isPolishing,
         palette = palette,
         onCancelClick = onCancelClick,
         onPolishClick = onPolishClick,
         onCompleteClick = {
-            if (!state.isFinalizing && !state.isPolishing) {
+            if (staticPreview) {
+                onCompleteClick()
+            } else if (!state.isFinalizing && !state.isPolishing) {
                 state.markLocalComplete()
                 onCompleteClick()
             }
@@ -35,7 +38,8 @@ fun FloatingButtonRowSection(
         modifier = modifier,
         showPolish = showPolish,
         elapsedSeconds = elapsedSeconds,
-        isNetworkProblem = isNetworkProblem,
-        blinkAlphaProvider = state.cursorAlphaProvider
+        isNetworkProblem = if (staticPreview) false else isNetworkProblem,
+        blinkAlphaProvider = if (staticPreview) ({ 1f }) else state.cursorAlphaProvider,
+        mockPressFeedback = staticPreview
     )
 }

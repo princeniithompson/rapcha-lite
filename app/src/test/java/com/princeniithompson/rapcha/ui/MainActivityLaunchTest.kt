@@ -37,24 +37,25 @@ class MainActivityLaunchTest {
         rule.waitForIdle()
         assertFalse(ThemeRepository.isDarkTheme.value)
 
-        // Open the Hamburger menu drawer so SettingsContent (including FlowRow & Dark theme switch) renders.
+        // Open the Hamburger menu drawer and navigate to Settings where Color mode tiles live.
         rule.onNodeWithContentDescription("Open Settings Menu").performClick()
         rule.waitForIdle()
+        rule.onNodeWithTag("drawer_settings_row").performClick()
+        rule.waitForIdle()
 
-        rule.onNodeWithTag("dark_theme_switch", useUnmergedTree = true)
+        rule.onNodeWithTag("color_mode_dark_tile", useUnmergedTree = true)
             .performScrollTo()
-            .assertIsOff()
             .performClick()
         rule.waitForIdle()
 
         assertTrue(ThemeRepository.isDarkTheme.value)
-        rule.onNodeWithTag("dark_theme_switch", useUnmergedTree = true).assertIsOn()
+        rule.onNodeWithTag("color_mode_dark_tile_check", useUnmergedTree = true).assertExists()
 
-        // Toggle back to Light theme to verify reverse MaterialKolor transition works cleanly too.
-        rule.onNodeWithTag("dark_theme_switch", useUnmergedTree = true).performClick()
+        // Switch back to Light theme via Light preview tile to verify reverse MaterialKolor transition.
+        rule.onNodeWithTag("color_mode_light_tile", useUnmergedTree = true).performClick()
         rule.waitForIdle()
         assertFalse(ThemeRepository.isDarkTheme.value)
-        rule.onNodeWithTag("dark_theme_switch", useUnmergedTree = true).assertIsOff()
+        rule.onNodeWithTag("color_mode_light_tile_check", useUnmergedTree = true).assertExists()
     }
 
     @Test
@@ -84,8 +85,9 @@ class MainActivityLaunchTest {
         rule.onNodeWithContentDescription("Open Settings Menu").performClick()
         rule.waitForIdle()
 
-        // Verify Profile card & standalone containerless usage lines render cleanly
+        // Verify Profile card (with avatar status dot) & standalone usage lines render cleanly
         rule.onNodeWithTag("drawer_profile_card").performScrollTo()
+        rule.onNodeWithTag("drawer_avatar_status_dot", useUnmergedTree = true).assertExists()
         rule.onNodeWithTag("drawer_usage_section").performScrollTo()
         rule.onNodeWithTag("usage_bar_modules", useUnmergedTree = true).assertExists()
         rule.onNodeWithTag("usage_bar_offline", useUnmergedTree = true).assertExists()
@@ -110,12 +112,16 @@ class MainActivityLaunchTest {
         rule.onNodeWithTag("account_back_button").performClick()
         rule.waitForIdle()
 
-        // Re-open Hamburger drawer and tap Settings -> opens AppSettingsScreen with Daily usage row
+        // Re-open Hamburger drawer and tap pinned bottom Settings row -> opens AppSettingsScreen
         rule.onNodeWithContentDescription("Open Settings Menu").performClick()
         rule.waitForIdle()
-        rule.onNodeWithTag("drawer_settings_row").performScrollTo().performClick()
+        rule.onNodeWithTag("drawer_settings_row").performClick()
         rule.waitForIdle()
         rule.onNodeWithTag("app_settings_screen").assertExists()
+        rule.onNodeWithTag("smart_mode_row").performScrollTo()
+        rule.onNodeWithTag("floating_bubble_row").performScrollTo()
+        rule.onNodeWithTag("always_on_screen_row").performScrollTo()
+        rule.onNodeWithTag("color_mode_row").performScrollTo()
         rule.onNodeWithTag("settings_usage_row").performScrollTo().performClick()
         rule.waitForIdle()
         rule.onNodeWithTag("usage_details_screen").assertExists()

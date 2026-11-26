@@ -6,6 +6,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -92,35 +93,131 @@ class AccountScreenPolishTest {
     }
 
     @Test
-    fun `sign out row opens confirmation dialog and only confirms on Sign out click`() {
-        var disconnectCount = 0
+    fun `api key card shows visual badge without Connected pill or email when connected in light mode`() {
+        verifyApiKeyCard(darkTheme = false, connected = true)
+    }
+
+    @Test
+    fun `api key card shows visual badge without Connected pill or email when connected in dark mode`() {
+        verifyApiKeyCard(darkTheme = true, connected = true)
+    }
+
+    @Test
+    fun `api key card shows gray badge without check icon when disconnected in light mode`() {
+        verifyApiKeyCard(darkTheme = false, connected = false)
+    }
+
+    @Test
+    fun `api key card shows gray badge without check icon when disconnected in dark mode`() {
+        verifyApiKeyCard(darkTheme = true, connected = false)
+    }
+
+    private fun verifyApiKeyCard(darkTheme: Boolean, connected: Boolean) {
         composeRule.setContent {
-            MyApplicationTheme(darkTheme = true, dynamicColor = false) {
-                AccountScreen(
-                    apiKey = "AIzaSyTestKey1234567890ABCDEFGHIJKLMNOP",
-                    apiKeyConfigured = true,
-                    signedInEmail = "prince@example.com",
-                    isProvisioning = false,
-                    apiKeyErrorReason = "",
-                    totals = DictationStats.Totals(words = 33790L, seconds = 13982L),
-                    onBack = {},
-                    onSaveApiKey = {},
-                    onAutoGetWithGoogle = {},
-                    onSyncProfileAndLimits = {},
-                    onDisconnectAccount = { disconnectCount++ }
-                )
+            MyApplicationTheme(darkTheme = darkTheme, dynamicColor = false) {
+                Box(modifier = Modifier.requiredSize(width = 360.dp, height = 800.dp)) {
+                    AccountScreen(
+                        apiKey = if (connected) "AIzaSyTestKey1234567890ABCDEFGHIJKLMNOP" else "",
+                        apiKeyConfigured = connected,
+                        signedInEmail = "prince@example.com",
+                        isProvisioning = false,
+                        apiKeyErrorReason = "",
+                        totals = DictationStats.Totals(words = 33790L, seconds = 13982L),
+                        onBack = {},
+                        onSaveApiKey = {},
+                        onAutoGetWithGoogle = {},
+                        onSyncProfileAndLimits = {},
+                        onDisconnectAccount = {}
+                    )
+                }
             }
         }
         composeRule.waitForIdle()
 
-        // Tapping sign-out opens dialog without signing out immediately
+        // Title is visible; Connected text pill is gone
+        composeRule.onNodeWithText("Gemini API key").assertIsDisplayed()
+        composeRule.onNodeWithText("Connected").assertDoesNotExist()
+
+        // Email appears only once (in the profile card, not repeated in the API key card)
+        val emailNodes = composeRule.onAllNodesWithText("prince@example.com").fetchSemanticsNodes()
+        assertEquals(1, emailNodes.size)
+
+        // 20dp status badge is shown on the key icon box
+        val badgeBounds = composeRule.onNodeWithTag("api_key_status_badge", useUnmergedTree = true)
+            .getUnclippedBoundsInRoot()
+        assertEquals(20f, (badgeBounds.right - badgeBounds.left).value, 1.5f)
+        assertEquals(20f, (badgeBounds.bottom - badgeBounds.top).value, 1.5f)
+
+        if (connected) {
+            composeRule.onNodeWithTag("api_key_status_check", useUnmergedTree = true).assertIsDisplayed()
+            // Tap header to expand and verify API key field + Save key + Clear key remain intact
+            composeRule.onNodeWithTag("settings_api_key_header").performScrollTo().performClick()
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("settings_api_key_input").performScrollTo().assertIsDisplayed()
+            composeRule.onNodeWithTag("settings_save_api_key_button").performScrollTo().assertIsDisplayed()
+            composeRule.onNodeWithTag("settings_clear_api_key_button").performScrollTo().assertIsDisplayed()
+        } else {
+            composeRule.onNodeWithTag("api_key_status_check", useUnmergedTree = true).assertDoesNotExist()
+        }
+    }
+
+    @Test
+    fun `log out row and dialog work in light mode`() {
+        verifyLogOutRowAndDialog(darkTheme = false)
+    }
+
+    @Test
+    fun `log out row and dialog work in dark mode`() {
+        verifyLogOutRowAndDialog(darkTheme = true)
+    }
+
+    private fun verifyLogOutRowAndDialog(darkTheme: Boolean) {
+        var disconnectCount = 0
+        composeRule.setContent {
+            MyApplicationTheme(darkTheme = darkTheme, dynamicColor = false) {
+                Box(modifier = Modifier.requiredSize(width = 360.dp, height = 800.dp)) {
+                    AccountScreen(
+                        apiKey = "AIzaSyTestKey1234567890ABCDEFGHIJKLMNOP",
+                        apiKeyConfigured = true,
+                        signedInEmail = "prince@example.com",
+                        isProvisioning = false,
+                        apiKeyErrorReason = "",
+                        totals = DictationStats.Totals(words = 33790L, seconds = 13982L),
+                        onBack = {},
+                        onSaveApiKey = {},
+                        onAutoGetWithGoogle = {},
+                        onSyncProfileAndLimits = {},
+                        onDisconnectAccount = { disconnectCount++ }
+                    )
+                }
+            }
+        }
+        composeRule.waitForIdle()
+
+        // Row reads "Log out" and old label is gone
+        composeRule.onNodeWithText("Sign out & clear API key").assertDoesNotExist()
+        composeRule.onNodeWithText("Log out").assertIsDisplayed()
+
+        // Tapping Log out opens confirmation dialog without signing out immediately
         composeRule.onNodeWithTag("account_sign_out_row").performScrollTo().performClick()
         composeRule.waitForIdle()
         assertEquals(0, disconnectCount)
         composeRule.onNodeWithTag("account_sign_out_dialog").assertIsDisplayed()
-        composeRule.onNodeWithText(
-            "This will sign you out and remove your Gemini API key from this device. You will need to add it again to use the app."
-        ).assertIsDisplayed()
+        composeRule.onNodeWithText("Log out?").assertIsDisplayed()
+        composeRule.onNodeWithText("Your API key will be removed.").assertIsDisplayed()
+
+        // Warning icon is 40dp
+        val iconBounds = composeRule.onNodeWithTag("account_sign_out_warning_icon", useUnmergedTree = true)
+            .getUnclippedBoundsInRoot()
+        assertEquals(40f, (iconBounds.right - iconBounds.left).value, 1.5f)
+        assertEquals(40f, (iconBounds.bottom - iconBounds.top).value, 1.5f)
+
+        // Cancel and Log out buttons are side by side, 48dp tall, 12dp gap
+        val cancelBounds = composeRule.onNodeWithTag("account_sign_out_cancel_button").getUnclippedBoundsInRoot()
+        val confirmBounds = composeRule.onNodeWithTag("account_sign_out_confirm_button").getUnclippedBoundsInRoot()
+        assertEquals(48f, (cancelBounds.bottom - cancelBounds.top).value, 1.5f)
+        assertEquals(48f, (confirmBounds.bottom - confirmBounds.top).value, 1.5f)
+        assertEquals(12f, (confirmBounds.left - cancelBounds.right).value, 1.5f)
 
         // Cancel closes dialog without calling onDisconnectAccount
         composeRule.onNodeWithTag("account_sign_out_cancel_button").performClick()
@@ -128,7 +225,7 @@ class AccountScreenPolishTest {
         composeRule.onNodeWithTag("account_sign_out_dialog").assertDoesNotExist()
         assertEquals(0, disconnectCount)
 
-        // Re-open and confirm Sign out
+        // Re-open and confirm Log out
         composeRule.onNodeWithTag("account_sign_out_row").performScrollTo().performClick()
         composeRule.waitForIdle()
         composeRule.onNodeWithTag("account_sign_out_confirm_button").performClick()

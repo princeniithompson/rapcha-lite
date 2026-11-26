@@ -47,6 +47,7 @@ fun FloatingNotchedCutoutSection(
     onDragEnd: () -> Unit = {},
     spinning: Boolean = false,
     bubbleVisible: Boolean = true,
+    staticPreview: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     FloatingDockedLifebuoy(
@@ -56,6 +57,7 @@ fun FloatingNotchedCutoutSection(
         onDragEnd = onDragEnd,
         spinning = spinning,
         bubbleVisible = bubbleVisible,
+        staticPreview = staticPreview,
         modifier = modifier
     )
 }

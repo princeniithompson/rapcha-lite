@@ -6,11 +6,14 @@ import android.widget.Toast
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -29,6 +32,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.PagerState
 import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
@@ -59,7 +63,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -441,7 +451,7 @@ fun HomeScreen(
 @Composable
 private fun carouselHeight(): Dp {
     val scale = LocalDensity.current.fontScale.coerceIn(1f, 2f)
-    return 236.dp + 140.dp * (scale - 1f)
+    return 252.dp + 140.dp * (scale - 1f)
 }
 
 /**
@@ -502,23 +512,23 @@ private fun TopCarouselSection(
                 .height(carouselHeight())
                 .testTag("home_carousel")
         ) { page ->
-            Box(modifier = Modifier.fillMaxSize()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 4.dp, vertical = 8.dp)
+            ) {
                 when (page) {
                     HomeCarouselPolicy.PAGE_WORDS_BUBBLE -> BubbleChoicePage(
                         style = BubbleChromeStyle.ORIGINAL,
                         title = "Original bubble",
-                        caption = "Shows your words as you speak",
                         active = activeChrome == BubbleChromeStyle.ORIGINAL,
-                        animating = isResumed && pagerState.currentPage == page,
                         onChoose = { onChooseChrome(BubbleChromeStyle.ORIGINAL) },
                         isDark = isDark
                     )
                     HomeCarouselPolicy.PAGE_MINI_BUBBLE -> BubbleChoicePage(
                         style = BubbleChromeStyle.COMPACT,
                         title = "Mini bubble",
-                        caption = "A small pill with a timer",
                         active = activeChrome == BubbleChromeStyle.COMPACT,
-                        animating = isResumed && pagerState.currentPage == page,
                         onChoose = { onChooseChrome(BubbleChromeStyle.COMPACT) },
                         isDark = isDark
                     )
@@ -587,144 +597,203 @@ private fun PagerDots(pagerState: PagerState, totalPages: Int) {
 }
 
 /**
- * One bubble page. The preview is the real live bubble composable (dark overlay theme,
- * font scale pinned to 1 exactly like the floating window). Tapping the bubble or the
- * button makes it the active bubble.
+ * One bubble choice card. The preview inside is a completely static mock-up (zero infinite
+ * animations, mock buttons only show a quick press effect and do nothing real). Tapping
+ * anywhere on the card outside the preview buttons chooses that bubble.
  */
 @Composable
 private fun BubbleChoicePage(
     style: BubbleChromeStyle,
     title: String,
-    caption: String,
     active: Boolean,
-    animating: Boolean,
     onChoose: () -> Unit,
     isDark: Boolean = false
 ) {
     val key = if (style == BubbleChromeStyle.COMPACT) "mini" else "words"
-    Card(
+    val chosenGreen = Color(0xFF16A34A)
+    val unselectedBorder = if (isDark) {
+        MaterialTheme.colorScheme.outlineVariant
+    } else {
+        MaterialTheme.colorScheme.outline.copy(alpha = 0.45f)
+    }
+    val cardShape = RoundedCornerShape(26.dp)
+
+    val cardScale by animateFloatAsState(
+        targetValue = if (active) 1f else 0.96f,
+        animationSpec = tween(durationMillis = 200),
+        label = "bubble_card_scale_$key"
+    )
+    val cardAlpha by animateFloatAsState(
+        targetValue = if (active) 1f else 0.60f,
+        animationSpec = tween(durationMillis = 200),
+        label = "bubble_card_alpha_$key"
+    )
+    val borderWidth by animateDpAsState(
+        targetValue = if (active) 3.dp else 1.dp,
+        animationSpec = tween(durationMillis = 200),
+        label = "bubble_border_width_$key"
+    )
+    val borderColor by animateColorAsState(
+        targetValue = if (active) chosenGreen else unselectedBorder,
+        animationSpec = tween(durationMillis = 200),
+        label = "bubble_border_color_$key"
+    )
+    val glowStrength by animateFloatAsState(
+        targetValue = if (active) 1f else 0f,
+        animationSpec = tween(durationMillis = 200),
+        label = "bubble_glow_strength_$key"
+    )
+
+    Box(
         modifier = Modifier
             .fillMaxSize()
-            .testTag("bubble_page_$key"),
-        shape = RoundedCornerShape(26.dp),
-        // v27: same card as the stats pages (white in light mode, no border); the active
-        // bubble keeps its primary outline so the choice stays visible.
-        colors = CardDefaults.cardColors(
-            containerColor = if (isDark) MaterialTheme.colorScheme.surfaceContainer else MaterialTheme.colorScheme.surfaceContainerLowest
-        ),
-        border = when {
-            active -> BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary)
-            isDark -> BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
-            else -> null
-        },
-        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
-    ) {
-        Column(modifier = Modifier.fillMaxSize()) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(start = 18.dp, end = 14.dp, top = 14.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = title,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.weight(1f)
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                if (active) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(14.dp))
-                            .background(MaterialTheme.colorScheme.primary)
-                            .padding(horizontal = 10.dp, vertical = 6.dp)
-                            .testTag("bubble_active_$key")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Filled.Check,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onPrimary,
-                            modifier = Modifier.size(14.dp)
+            .graphicsLayer {
+                scaleX = cardScale
+                scaleY = cardScale
+                alpha = cardAlpha
+            }
+            .drawBehind {
+                if (glowStrength > 0.01f) {
+                    val baseCornerPx = 26.dp.toPx()
+                    val layers = listOf(
+                        Pair(2.dp.toPx(), if (isDark) 0.20f else 0.16f),
+                        Pair(5.dp.toPx(), if (isDark) 0.12f else 0.09f),
+                        Pair(8.dp.toPx(), if (isDark) 0.06f else 0.04f)
+                    )
+                    for ((spread, alphaFactor) in layers) {
+                        drawRoundRect(
+                            color = chosenGreen.copy(alpha = alphaFactor * glowStrength),
+                            topLeft = Offset(-spread, -spread),
+                            size = Size(size.width + spread * 2f, size.height + spread * 2f),
+                            cornerRadius = CornerRadius(baseCornerPx + spread, baseCornerPx + spread)
                         )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(
-                            text = "Active",
-                            color = MaterialTheme.colorScheme.onPrimary,
-                            fontSize = 12.5.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                } else {
-                    FilledTonalButton(
-                        onClick = onChoose,
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
-                        modifier = Modifier.testTag("bubble_use_$key")
-                    ) {
-                        Text("Use this bubble", fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold)
                     }
                 }
             }
-            Text(
-                text = caption,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                fontSize = 12.5.sp,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.padding(start = 18.dp, end = 14.dp, top = 2.dp)
+            .shadow(
+                elevation = (8f * glowStrength).dp,
+                shape = cardShape,
+                ambientColor = chosenGreen,
+                spotColor = chosenGreen
             )
-
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f)
-                    .clickable(
-                        onClickLabel = "Use $title",
-                        role = Role.Button,
-                        onClick = onChoose
-                    )
-                    .testTag("bubble_preview_$key"),
-                contentAlignment = Alignment.Center
-            ) {
-                val base = LocalDensity.current
-                val previewContext = LocalContext.current
-                val isLowPower = remember(previewContext) {
-                    com.princeniithompson.rapcha.service.floating.DevicePerformanceTier.isLowPowerDevice(previewContext)
+    ) {
+        Card(
+            modifier = Modifier
+                .fillMaxSize()
+                .clip(cardShape)
+                .selectable(
+                    selected = active,
+                    role = Role.RadioButton,
+                    onClick = onChoose
+                )
+                .testTag("bubble_page_$key"),
+            shape = cardShape,
+            colors = CardDefaults.cardColors(
+                containerColor = if (isDark) {
+                    MaterialTheme.colorScheme.surfaceContainer
+                } else {
+                    MaterialTheme.colorScheme.surfaceContainerLowest
                 }
-                CompositionLocalProvider(LocalDensity provides Density(base.density, fontScale = 1f)) {
-                    MyApplicationTheme(darkTheme = true, dynamicColor = true) {
-                        // The previews only draw; the parent Box takes every tap.
-                        Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                            if (style == BubbleChromeStyle.ORIGINAL) {
-                                FloatingDictationPopup(
-                                    transcriptText = "Hey, I'm on my way. See you in ten minutes with the notes ready.",
-                                    isRecording = true,
-                                    isPendingFinalizing = false,
-                                    isPolishing = false,
-                                    elapsedSeconds = 12,
-                                    audioAmplitude = 0f,
-                                    mimicTalkingWhenSilent = true,
-                                    bubbleVisible = animating,
-                                    lowPower = isLowPower,
-                                    onCancelClick = onChoose,
-                                    onPolishClick = onChoose,
-                                    onCompleteClick = onChoose,
-                                    onLifebuoyClick = onChoose
+            ),
+            border = BorderStroke(borderWidth, borderColor),
+            elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+        ) {
+            Column(modifier = Modifier.fillMaxSize()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 18.dp, end = 16.dp, top = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = title,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        fontSize = 17.sp,
+                        lineHeight = 25.5.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        textAlign = TextAlign.Start,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+                    if (active) {
+                        Box(
+                            modifier = Modifier
+                                .size(32.dp)
+                                .clip(CircleShape)
+                                .background(chosenGreen)
+                                .testTag("bubble_active_$key"),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Check,
+                                contentDescription = "$title chosen",
+                                tint = Color.White,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .size(32.dp)
+                                .clip(CircleShape)
+                                .border(
+                                    width = 2.dp,
+                                    color = unselectedBorder,
+                                    shape = CircleShape
                                 )
-                            } else {
-                                CompactRecordingBar(
-                                    elapsedSeconds = 7,
-                                    appName = "Listening",
-                                    palette = rememberDynamicAuroraPalette(),
-                                    audioAmplitude = 0f,
-                                    mimicTalkingWhenSilent = true,
-                                    bubbleVisible = animating,
-                                    lowPower = isLowPower,
-                                    onCancel = onChoose,
-                                    onComplete = onChoose
-                                )
+                                .testTag("bubble_unselected_$key")
+                        )
+                    }
+                }
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                        .testTag("bubble_preview_$key"),
+                    contentAlignment = Alignment.Center
+                ) {
+                    val base = LocalDensity.current
+                    val previewContext = LocalContext.current
+                    val isLowPower = remember(previewContext) {
+                        com.princeniithompson.rapcha.service.floating.DevicePerformanceTier.isLowPowerDevice(previewContext)
+                    }
+                    CompositionLocalProvider(LocalDensity provides Density(base.density, fontScale = 1f)) {
+                        MyApplicationTheme(darkTheme = true, dynamicColor = true) {
+                            Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                                if (style == BubbleChromeStyle.ORIGINAL) {
+                                    FloatingDictationPopup(
+                                        transcriptText = "Hey, I'm on my way. See you in ten minutes with the notes ready.",
+                                        isRecording = true,
+                                        isPendingFinalizing = false,
+                                        isPolishing = false,
+                                        elapsedSeconds = 12,
+                                        audioAmplitude = 0f,
+                                        mimicTalkingWhenSilent = true,
+                                        bubbleVisible = false,
+                                        lowPower = isLowPower,
+                                        staticPreview = true,
+                                        onCancelClick = {},
+                                        onPolishClick = {},
+                                        onCompleteClick = {},
+                                        onLifebuoyClick = {}
+                                    )
+                                } else {
+                                    CompactRecordingBar(
+                                        elapsedSeconds = 7,
+                                        appName = "Listening",
+                                        palette = rememberDynamicAuroraPalette(),
+                                        audioAmplitude = 0f,
+                                        mimicTalkingWhenSilent = true,
+                                        bubbleVisible = false,
+                                        lowPower = isLowPower,
+                                        staticPreview = true,
+                                        onCancel = {},
+                                        onComplete = {}
+                                    )
+                                }
                             }
                         }
                     }

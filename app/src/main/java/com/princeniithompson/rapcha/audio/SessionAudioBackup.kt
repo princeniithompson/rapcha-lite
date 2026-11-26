@@ -7,6 +7,7 @@ import android.media.MediaFormat
 import android.media.MediaMuxer
 import android.util.Log
 import com.princeniithompson.rapcha.websocket.InterimPreviewMonitor
+import com.princeniithompson.rapcha.websocket.TranscriptAcceptance
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileInputStream
@@ -40,7 +41,9 @@ class SessionAudioBackup(private val context: Context) {
         private const val CHANNEL_COUNT = 1
         private const val BITS_PER_SAMPLE = 16
         private const val BYTES_PER_MS = 32L
-        private const val AAC_BITRATE_BPS = 32_000
+        /** 16 kbps mono 16 kHz AAC-LC halves fallback upload size with clear ASR speech quality. */
+        private const val AAC_BITRATE_BPS = 16_000
+        private const val AAC_FALLBACK_BITRATE_BPS = 32_000
         private const val CODEC_TIMEOUT_US = 10_000L
         /** Minimum 100 ms of PCM before attempting fallback upload. */
         private const val MIN_FALLBACK_PCM_BYTES = 3_200L
@@ -86,8 +89,28 @@ class SessionAudioBackup(private val context: Context) {
     @Volatile var bytesWritten: Long = 0L
         private set
 
-    @Volatile var hasSpeech: Boolean = false
-        private set
+    private var rmsSum: Double = 0.0
+    private var rmsMaxValue: Double = 0.0
+    private var rmsSamples: Int = 0
+
+    /**
+     * Aligned with [TranscriptAcceptance.isNearSilent] so near-silent audio intentionally dropped
+     * by Live never triggers a wasted non-live batch fallback call.
+     */
+    val hasSpeech: Boolean
+        get() = synchronized(lock) {
+            rmsSamples > 0 && !TranscriptAcceptance.isNearSilent(
+                rmsMean = rmsSum / rmsSamples,
+                rmsMax = rmsMaxValue,
+                samples = rmsSamples
+            )
+        }
+
+    val rmsMean: Double
+        get() = synchronized(lock) { if (rmsSamples == 0) 0.0 else rmsSum / rmsSamples }
+
+    val rmsMax: Double
+        get() = synchronized(lock) { if (rmsSamples == 0) 0.0 else rmsMaxValue }
 
     fun startNewSession() {
         synchronized(lock) {
@@ -117,9 +140,9 @@ class SessionAudioBackup(private val context: Context) {
             try {
                 stream.write(pcmChunk)
                 bytesWritten += pcmChunk.size
-                if (!hasSpeech && rms >= InterimPreviewMonitor.SPEECH_RMS_THRESHOLD) {
-                    hasSpeech = true
-                }
+                rmsSum += rms
+                if (rms > rmsMaxValue) rmsMaxValue = rms
+                rmsSamples += 1
             } catch (e: Throwable) {
                 Log.w(TAG, "Failed writing session backup chunk: ${e.message}")
             }
@@ -143,7 +166,11 @@ class SessionAudioBackup(private val context: Context) {
             outputStream = null
             snapshotFile = pcmFile ?: return null
             capturedBytes = bytesWritten
-            heardSpeech = hasSpeech
+            heardSpeech = rmsSamples > 0 && !TranscriptAcceptance.isNearSilent(
+                rmsMean = rmsSum / rmsSamples,
+                rmsMax = rmsMaxValue,
+                samples = rmsSamples
+            )
         }
 
         if (!heardSpeech || capturedBytes < MIN_FALLBACK_PCM_BYTES || !snapshotFile.exists()) {
@@ -153,7 +180,9 @@ class SessionAudioBackup(private val context: Context) {
         val durationMs = capturedBytes / BYTES_PER_MS
         val m4aFile = File(context.cacheDir, "${FILE_PREFIX}${fileSeq.incrementAndGet()}.m4a")
         try {
-            if (encodePcmToM4a(snapshotFile, m4aFile) && m4aFile.exists() && m4aFile.length() > 128L) {
+            val encoded = encodePcmToM4a(snapshotFile, m4aFile, AAC_BITRATE_BPS) ||
+                encodePcmToM4a(snapshotFile, m4aFile, AAC_FALLBACK_BITRATE_BPS)
+            if (encoded && m4aFile.exists() && m4aFile.length() > 128L) {
                 val encodedBytes = m4aFile.readBytes()
                 if (encodedBytes.isNotEmpty() && encodedBytes.size < capturedBytes) {
                     Log.i(
@@ -199,7 +228,9 @@ class SessionAudioBackup(private val context: Context) {
 
     private fun openFreshFileLocked() {
         bytesWritten = 0L
-        hasSpeech = false
+        rmsSum = 0.0
+        rmsMaxValue = 0.0
+        rmsSamples = 0
         try {
             val dir = context.cacheDir
             if (!dir.exists()) dir.mkdirs()
@@ -226,7 +257,9 @@ class SessionAudioBackup(private val context: Context) {
         }
         pcmFile = null
         bytesWritten = 0L
-        hasSpeech = false
+        rmsSum = 0.0
+        rmsMaxValue = 0.0
+        rmsSamples = 0
     }
 
     private fun sweepOrphanedFiles() {
@@ -245,20 +278,23 @@ class SessionAudioBackup(private val context: Context) {
      * Encodes raw 16 kHz / 16-bit / mono PCM into a standard MPEG-4 AAC (.m4a) file using
      * Android's built-in MediaCodec + MediaMuxer (zero external native libraries).
      */
-    private fun encodePcmToM4a(pcmSource: File, m4aDest: File): Boolean {
+    private fun encodePcmToM4a(pcmSource: File, m4aDest: File, bitrateBps: Int): Boolean {
         var codec: MediaCodec? = null
         var muxer: MediaMuxer? = null
         var muxerStarted = false
         var trackIndex = -1
 
         return try {
+            if (m4aDest.exists()) {
+                runCatching { m4aDest.delete() }
+            }
             val format = MediaFormat.createAudioFormat(
                 MediaFormat.MIMETYPE_AUDIO_AAC,
                 SAMPLE_RATE_HZ,
                 CHANNEL_COUNT
             ).apply {
                 setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
-                setInteger(MediaFormat.KEY_BIT_RATE, AAC_BITRATE_BPS)
+                setInteger(MediaFormat.KEY_BIT_RATE, bitrateBps)
                 setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 16_384)
             }
 
@@ -268,16 +304,18 @@ class SessionAudioBackup(private val context: Context) {
 
             muxer = MediaMuxer(m4aDest.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
             val bufferInfo = MediaCodec.BufferInfo()
-            val readBuf = ByteArray(4_096)
+            val readBuf = ByteArray(16_384)
 
             var inputDone = false
             var outputDone = false
             var totalBytesFed = 0L
+            var noProgressSpins = 0
 
             FileInputStream(pcmSource).use { fis ->
                 while (!outputDone) {
+                    var fedInput = false
                     if (!inputDone) {
-                        val inIdx = codec.dequeueInputBuffer(CODEC_TIMEOUT_US)
+                        val inIdx = codec.dequeueInputBuffer(0L)
                         if (inIdx >= 0) {
                             val inBuf = codec.getInputBuffer(inIdx)
                             if (inBuf != null) {
@@ -300,31 +338,52 @@ class SessionAudioBackup(private val context: Context) {
                                     codec.queueInputBuffer(inIdx, 0, read, ptsUs, 0)
                                     totalBytesFed += read
                                 }
+                                fedInput = true
                             }
                         }
                     }
 
-                    val outIdx = codec.dequeueOutputBuffer(bufferInfo, CODEC_TIMEOUT_US)
-                    when {
-                        outIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
-                            if (!muxerStarted) {
-                                trackIndex = muxer.addTrack(codec.outputFormat)
-                                muxer.start()
-                                muxerStarted = true
-                            }
+                    var drainedOutput = false
+                    while (!outputDone) {
+                        val drainTimeoutUs = if (inputDone || (!fedInput && !drainedOutput)) {
+                            CODEC_TIMEOUT_US
+                        } else {
+                            0L
                         }
-                        outIdx >= 0 -> {
-                            val outBuf = codec.getOutputBuffer(outIdx)
-                            val isConfig = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0
-                            if (!isConfig && bufferInfo.size > 0 && outBuf != null && muxerStarted) {
-                                outBuf.position(bufferInfo.offset)
-                                outBuf.limit(bufferInfo.offset + bufferInfo.size)
-                                muxer.writeSampleData(trackIndex, outBuf, bufferInfo)
+                        val outIdx = codec.dequeueOutputBuffer(bufferInfo, drainTimeoutUs)
+                        when {
+                            outIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+                                if (!muxerStarted) {
+                                    trackIndex = muxer.addTrack(codec.outputFormat)
+                                    muxer.start()
+                                    muxerStarted = true
+                                }
+                                drainedOutput = true
                             }
-                            codec.releaseOutputBuffer(outIdx, false)
-                            if ((bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
-                                outputDone = true
+                            outIdx >= 0 -> {
+                                val outBuf = codec.getOutputBuffer(outIdx)
+                                val isConfig = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0
+                                if (!isConfig && bufferInfo.size > 0 && outBuf != null && muxerStarted) {
+                                    outBuf.position(bufferInfo.offset)
+                                    outBuf.limit(bufferInfo.offset + bufferInfo.size)
+                                    muxer.writeSampleData(trackIndex, outBuf, bufferInfo)
+                                }
+                                codec.releaseOutputBuffer(outIdx, false)
+                                drainedOutput = true
+                                if ((bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
+                                    outputDone = true
+                                }
                             }
+                            else -> break
+                        }
+                    }
+
+                    if (fedInput || drainedOutput) {
+                        noProgressSpins = 0
+                    } else {
+                        noProgressSpins++
+                        if (noProgressSpins > 200) {
+                            break
                         }
                     }
                 }

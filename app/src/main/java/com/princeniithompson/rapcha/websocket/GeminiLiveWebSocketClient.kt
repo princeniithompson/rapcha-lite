@@ -164,9 +164,9 @@ class GeminiLiveWebSocketClient(
             if (!hasLivePreview) return STALLED_LIVE_FALLBACK_TIMEOUT_MS
             if (!smartMode) return RAW_LIVE_FALLBACK_TIMEOUT_MS
             return when {
-                recordingSeconds <= 15 -> 5_500L
-                recordingSeconds <= 45 -> 7_000L
-                else -> 8_500L
+                recordingSeconds <= 15 -> 8_500L
+                recordingSeconds <= 45 -> 10_000L
+                else -> 11_500L
             }
         }
 
@@ -270,6 +270,49 @@ class GeminiLiveWebSocketClient(
     /** True once Gemini Live has emitted at least one interim preview or committed piece in this session. */
     val hasReceivedLivePreview: Boolean
         get() = lastInterimText.isNotBlank() || committedPieces > 0
+
+    val isSplittingNow: Boolean
+        get() = splitting.get()
+
+    val currentSocketStateLabel: String
+        get() = when {
+            isExplicitlyClosed.get() -> "closed"
+            waitingForNetwork -> "waiting_net"
+            isReconnecting -> "reconnecting"
+            webSocket == null -> "closed"
+            !isSetupComplete.get() -> "connecting"
+            else -> "open"
+        }
+
+    val totalReconnectAttemptsInSession: Int
+        get() = sessionReconnectCount.get()
+
+    private val sessionReconnectCount = AtomicInteger(0)
+    @Volatile var wasDisconnectedDuringFinalize: Boolean = false
+        private set
+    @Volatile var lastPieceDroppedAsNearSilent: Boolean = false
+        private set
+    @Volatile var wsQueueBytesAtActivityEnd: Long = 0L
+        private set
+    @Volatile var wsQueueBytesAtFinalizeDone: Long = 0L
+        private set
+    @Volatile private var lastInterimReceivedAtMs: Long = 0L
+    @Volatile var lastInterimAgeAtEndMs: Long = -1L
+        private set
+    private val postEndFrameTags = ArrayList<String>(8)
+
+    val postEndFramesSummary: String
+        get() = synchronized(postEndFrameTags) {
+            if (postEndFrameTags.isEmpty()) "none" else postEndFrameTags.joinToString(",")
+        }
+
+    private fun recordPostEndFrameTag(tag: String) {
+        synchronized(postEndFrameTags) {
+            if (postEndFrameTags.size < 6) {
+                postEndFrameTags.add(tag)
+            }
+        }
+    }
 
     val interimPreviewMonitor = InterimPreviewMonitor()
     private val planner = DictationPiecePlanner(rescueGapMs = SLOW_NETWORK_RESCUE_GAP_MS)
@@ -485,6 +528,10 @@ class GeminiLiveWebSocketClient(
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                if (isExplicitlyClosed.get()) {
+                    isConnectingGuard.set(false)
+                    return
+                }
                 if (this@GeminiLiveWebSocketClient.webSocket != null && this@GeminiLiveWebSocketClient.webSocket !== webSocket) {
                     return
                 }
@@ -562,10 +609,15 @@ class GeminiLiveWebSocketClient(
         if (!activityEnded.get() && !sessionFinalizing.get()) {
             preserveOpenPiece()
         }
-        if (activityEnded.get()) {
-            settleEndpoint(lastInterimText, timedOut = true)
+        if (isExplicitlyClosed.get()) {
+            isConnectingGuard.set(false)
+            return
         }
-        if (isExplicitlyClosed.get() || activityEnded.get()) {
+        if (activityEnded.get()) {
+            if (!endpointSettled.get()) {
+                wasDisconnectedDuringFinalize = true
+            }
+            settleEndpoint(lastInterimText, timedOut = true)
             isConnectingGuard.set(false)
             return
         }
@@ -611,6 +663,7 @@ class GeminiLiveWebSocketClient(
 
         waitingForNetwork = false
         val attempts = reconnectAttempts.incrementAndGet()
+        sessionReconnectCount.incrementAndGet()
 
         if (lastApiKey.isNotBlank() && attempts <= MAX_RECONNECT_ATTEMPTS) {
             // True exponential backoff with jitter:
@@ -702,6 +755,34 @@ class GeminiLiveWebSocketClient(
                 }
                 notifySetupComplete()
                 return
+            }
+
+            if (activityEnded.get()) {
+                val frameTag = when {
+                    json.has("error") -> "error"
+                    json.has("goAway") -> "goAway"
+                    json.has("serverContent") -> {
+                        val sc = json.optJSONObject("serverContent")
+                        val hasInputTrx = sc?.optJSONObject("inputTranscription")?.optString("text")?.isNotEmpty() == true
+                        val hasTurnDone = sc?.optBoolean("turnComplete", false) == true
+                        val hasInterrupted = sc?.optBoolean("interrupted", false) == true
+                        val hasGenDone = sc?.optBoolean("generationComplete", false) == true
+                        val hasInterim = sc?.optJSONObject("interimInputTranscription")?.optString("text")?.isNotEmpty() == true
+                        val hasModelTurn = sc?.optJSONObject("modelTurn") != null
+                        when {
+                            hasInputTrx && hasTurnDone -> "inputTrx+turnDone"
+                            hasInputTrx -> "inputTrx"
+                            hasTurnDone -> "turnDone"
+                            hasInterrupted -> "interrupted"
+                            hasGenDone -> "genDone"
+                            hasInterim -> "interim"
+                            hasModelTurn -> "modelTurn"
+                            else -> "scEmpty"
+                        }
+                    }
+                    else -> "other"
+                }
+                recordPostEndFrameTag(frameTag)
             }
 
             val goAway = json.optJSONObject("goAway")
@@ -915,7 +996,14 @@ class GeminiLiveWebSocketClient(
             val sent = ws.send(endJson.toString())
             if (sent) {
                 if (recordMonitor) {
-                    interimPreviewMonitor.onActivityEnd(clock())
+                    val now = clock()
+                    wsQueueBytesAtActivityEnd = runCatching { ws.queueSize() }.getOrDefault(0L)
+                    lastInterimAgeAtEndMs = if (lastInterimReceivedAtMs > 0L) {
+                        (now - lastInterimReceivedAtMs).coerceAtLeast(0L)
+                    } else {
+                        -1L
+                    }
+                    interimPreviewMonitor.onActivityEnd(now)
                 }
                 onLog(LogLevel.SENT, TAG, "Sent activityEnd", endJson.toString())
             }
@@ -949,6 +1037,7 @@ class GeminiLiveWebSocketClient(
             }
             val audio = planner.pieceAudio()
             if (TranscriptAcceptance.isNearSilent(audio.rmsMean, audio.rmsMax, audio.samples)) {
+                lastPieceDroppedAsNearSilent = true
                 settleEndpoint("", timedOut = false)
                 return@suspendCancellableCoroutine
             }
@@ -1145,6 +1234,7 @@ class GeminiLiveWebSocketClient(
     private fun notifyInterimTranscription(text: String) {
         if (text.isNotEmpty()) {
             lastInterimText = text
+            lastInterimReceivedAtMs = clock()
         }
         if (Looper.myLooper() == Looper.getMainLooper()) {
             onInterimTranscription(text)
@@ -1182,6 +1272,16 @@ class GeminiLiveWebSocketClient(
         cancelCompanionWait()
         endpointTimedOut = false
         finalSettledFromServer = false
+        sessionReconnectCount.set(0)
+        wasDisconnectedDuringFinalize = false
+        lastPieceDroppedAsNearSilent = false
+        wsQueueBytesAtActivityEnd = 0L
+        wsQueueBytesAtFinalizeDone = 0L
+        lastInterimReceivedAtMs = 0L
+        lastInterimAgeAtEndMs = -1L
+        synchronized(postEndFrameTags) {
+            postEndFrameTags.clear()
+        }
     }
 
     private fun handleGoAway(goAway: JSONObject) {
@@ -1195,6 +1295,7 @@ class GeminiLiveWebSocketClient(
         if (!endpointSettled.compareAndSet(false, true)) return
         endpointTimedOut = timedOut
         finalSettledFromServer = !timedOut && text.isNotBlank()
+        wsQueueBytesAtFinalizeDone = runCatching { webSocket?.queueSize() ?: 0L }.getOrDefault(0L)
         interimPreviewMonitor.onFinalTranscript(clock())
         endpointTimeoutRunnable?.let { mainHandler.removeCallbacks(it) }
         endpointTimeoutRunnable = null
@@ -1207,6 +1308,9 @@ class GeminiLiveWebSocketClient(
             com.princeniithompson.rapcha.data.CustomVocabularyRepository.getVocabulary(),
             audio.samples
         )
+        if (raw.isNotBlank() && piece.isEmpty()) {
+            lastPieceDroppedAsNearSilent = true
+        }
         noteSilenceDrop(raw, piece, audio.rmsMean, audio.rmsMax)
         val resultText = if (!timedOut) {
             if (piece.isNotEmpty()) {

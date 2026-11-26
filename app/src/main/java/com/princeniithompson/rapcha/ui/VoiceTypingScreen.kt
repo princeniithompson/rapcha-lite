@@ -23,7 +23,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.rounded.AutoFixHigh
+import com.princeniithompson.rapcha.ui.components.RapchaIcons
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -186,6 +186,7 @@ fun VoiceTypingScreen(
     var showAccountScreen by remember { mutableStateOf(false) }
     var showSettingsScreen by remember { mutableStateOf(false) }
     var showUsageDetailsScreen by remember { mutableStateOf(false) }
+    var showDiagnosticsScreen by remember { mutableStateOf(false) }
     var showVocabReviewScreen by remember { mutableStateOf(false) }
     var activeVocabCandidateId by remember { mutableStateOf<String?>(null) }
     val deviceHealthStatus = remember(resumeTick, drawerState.isOpen, showSettingsScreen) {
@@ -234,6 +235,9 @@ fun VoiceTypingScreen(
     }
     androidx.activity.compose.BackHandler(enabled = showUsageDetailsScreen) {
         showUsageDetailsScreen = false
+    }
+    androidx.activity.compose.BackHandler(enabled = showDiagnosticsScreen) {
+        showDiagnosticsScreen = false
     }
     androidx.activity.compose.BackHandler(enabled = showKeepAwakeScreen) {
         showKeepAwakeScreen = false
@@ -351,6 +355,11 @@ fun VoiceTypingScreen(
                 onSyncProfileAndLimits = syncProfileAndLimits,
                 modifier = modifier.fillMaxSize()
             )
+        } else if (showDiagnosticsScreen) {
+            com.princeniithompson.rapcha.ui.screens.DiagnosticsScreen(
+                onBack = { showDiagnosticsScreen = false },
+                modifier = modifier.fillMaxSize()
+            )
         } else if (showAccountScreen) {
             AccountScreen(
                 apiKey = activeApiKey,
@@ -398,6 +407,36 @@ fun VoiceTypingScreen(
                 },
                 onSyncProfileAndLimits = syncProfileAndLimits,
                 onOpenUsageDetails = { showUsageDetailsScreen = true },
+                onOpenDiagnostics = { showDiagnosticsScreen = true },
+                isSmartMode = isSmartMode,
+                onSmartModeToggle = { viewModel.setSmartMode(it) },
+                isBubbleEnabled = isBubbleEnabled,
+                onBubbleToggle = { enabled ->
+                    if (enabled && !viewModel.canDrawOverlays()) {
+                        openOverlaySettings()
+                        Toast.makeText(
+                            context,
+                            "Please grant 'Draw over other apps' permission",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                    viewModel.setBubbleEnabled(enabled)
+                },
+                isAlwaysOnScreen = isAlwaysOnScreen,
+                onAlwaysOnScreenToggle = { enabled ->
+                    if (enabled && !isBubbleEnabled) {
+                        if (!viewModel.canDrawOverlays()) {
+                            openOverlaySettings()
+                            Toast.makeText(
+                                context,
+                                "Please grant 'Draw over other apps' permission",
+                                Toast.LENGTH_LONG
+                            ).show()
+                        }
+                        viewModel.setBubbleEnabled(true)
+                    }
+                    viewModel.setAlwaysOnScreen(enabled)
+                },
                 modifier = modifier.fillMaxSize()
             )
         } else {
@@ -639,7 +678,7 @@ private fun LeanBottomNav(
                 modifier = Modifier.weight(1f)
             )
             BottomNavItem(
-                icon = Icons.Rounded.AutoFixHigh,
+                icon = RapchaIcons.Modules,
                 label = "Modules",
                 isSelected = selectedTab == MainScreenTab.MODULES,
                 onClick = { onTabSelected(MainScreenTab.MODULES) },

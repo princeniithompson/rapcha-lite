@@ -100,9 +100,9 @@ class DictationDeduplicationAndLatencyTest {
                 hasLocalBackup = true
             )
         )
-        // Healthy SMART sessions scale cleanly with utterance duration
+        // Healthy SMART sessions scale cleanly with utterance duration (+3s peak-hour headroom)
         assertEquals(
-            5_500L,
+            8_500L,
             GeminiLiveWebSocketClient.computeLiveFinalizeTimeoutMs(
                 recordingSeconds = 12,
                 smartMode = true,
@@ -111,7 +111,7 @@ class DictationDeduplicationAndLatencyTest {
             )
         )
         assertEquals(
-            7_000L,
+            10_000L,
             GeminiLiveWebSocketClient.computeLiveFinalizeTimeoutMs(
                 recordingSeconds = 30,
                 smartMode = true,
@@ -120,7 +120,7 @@ class DictationDeduplicationAndLatencyTest {
             )
         )
         assertEquals(
-            8_500L,
+            11_500L,
             GeminiLiveWebSocketClient.computeLiveFinalizeTimeoutMs(
                 recordingSeconds = 60,
                 smartMode = true,
@@ -183,18 +183,22 @@ class DictationDeduplicationAndLatencyTest {
 
         var returned = ""
         CoroutineScope(Dispatchers.Main).launch {
-            returned = client.endActivityAndAwaitFinal(timeoutMs = 5_500L)
+            returned = client.endActivityAndAwaitFinal(timeoutMs = 8_500L)
         }
-        shadowOf(Looper.getMainLooper()).idleFor(5_500L, TimeUnit.MILLISECONDS)
+        shadowOf(Looper.getMainLooper()).idleFor(8_500L, TimeUnit.MILLISECONDS)
 
         assertTrue(client.endpointTimedOut)
         assertFalse(client.finalSettledFromServer)
+        assertFalse(client.wasDisconnectedDuringFinalize)
         // Emergency fallback text is returned directly from endActivityAndAwaitFinal...
         assertEquals("raw unpolished live preview", returned)
         // ...but onFinalizedTranscription MUST NOT fire on timeout!
         assertTrue(finalizedCallbacks.isEmpty())
 
+        // Explicit disconnect + subsequent OkHttp socket-cancel onFailure must NOT flip wasDisconnectedDuringFinalize
         client.disconnect()
+        capturedListener.onFailure(capturedSocket, java.net.SocketException("Socket closed"), null)
+        assertFalse(client.wasDisconnectedDuringFinalize)
     }
 
     @Test

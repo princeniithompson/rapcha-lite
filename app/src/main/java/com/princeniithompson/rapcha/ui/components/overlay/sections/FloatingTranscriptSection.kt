@@ -60,6 +60,7 @@ fun FloatingTranscriptSection(
     cursorAlphaProvider: () -> Float,
     palette: AuroraColorPalette,
     scrollState: ScrollState,
+    staticPreview: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     // Keep earlier words intact instead of slicing off the front, so visible lines stay locked
@@ -71,6 +72,7 @@ fun FloatingTranscriptSection(
         cursorAlphaProvider = cursorAlphaProvider,
         palette = palette,
         scrollState = scrollState,
+        staticPreview = staticPreview,
         modifier = modifier
     )
 }

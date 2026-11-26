@@ -1,6 +1,10 @@
 package com.princeniithompson.rapcha.ui.screens
 
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -22,15 +26,22 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.AccessibilityNew
+import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.BarChart
 import androidx.compose.material.icons.rounded.Check
-import androidx.compose.material.icons.rounded.ErrorOutline
+import androidx.compose.material.icons.rounded.DarkMode
 import androidx.compose.material.icons.rounded.Explore
 import androidx.compose.material.icons.rounded.Layers
 import androidx.compose.material.icons.rounded.Logout
+import androidx.compose.material.icons.rounded.MonitorHeart
+import androidx.compose.material.icons.rounded.PriorityHigh
+import androidx.compose.material.icons.rounded.PushPin
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Shield
+import androidx.compose.material.icons.rounded.TripOrigin
+import androidx.compose.material.icons.rounded.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -50,9 +61,16 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -63,16 +81,17 @@ import androidx.compose.ui.window.DialogProperties
 import com.princeniithompson.rapcha.BuildConfig
 import com.princeniithompson.rapcha.data.ApiUsageRepository
 import com.princeniithompson.rapcha.data.DictationStats
+import com.princeniithompson.rapcha.data.ThemeRepository
 import com.princeniithompson.rapcha.data.UserProfileRepository
 import com.princeniithompson.rapcha.ui.DrawerSectionHeading
-import com.princeniithompson.rapcha.ui.SegmentPosition
-import com.princeniithompson.rapcha.ui.SegmentedNavRow
-import com.princeniithompson.rapcha.ui.SegmentedPermissionRow
+import com.princeniithompson.rapcha.ui.ExpressiveSwitch
 import com.princeniithompson.rapcha.ui.SettingsApiKeyCard
+import com.princeniithompson.rapcha.ui.TonalIconWell
 import com.princeniithompson.rapcha.ui.components.DailyUsageCard
 import com.princeniithompson.rapcha.ui.components.UserAvatarBadge
 import com.princeniithompson.rapcha.ui.components.elevatedCardBorder
 import com.princeniithompson.rapcha.ui.components.elevatedCardSurfaceColor
+import java.util.Locale
 
 /**
  * Full-screen Account page opened when tapping the Profile Card in the Hamburger Drawer.
@@ -305,7 +324,7 @@ fun AccountScreen(
                 )
             }
 
-            // Sign out / clear saved account info (visual look unchanged; tap opens confirmation dialog)
+            // Log out / clear saved account info
             if (apiKeyConfigured || effectiveEmail.isNotBlank()) {
                 Surface(
                     onClick = { showSignOutDialog = true },
@@ -332,10 +351,11 @@ fun AccountScreen(
                             modifier = Modifier.size(20.dp)
                         )
                         Text(
-                            text = "Sign out & clear API key",
-                            style = MaterialTheme.typography.bodyLarge,
+                            text = "Log out",
+                            style = MaterialTheme.typography.bodyLarge.copy(lineHeight = 24.sp),
                             fontWeight = FontWeight.SemiBold,
-                            color = MaterialTheme.colorScheme.error
+                            color = MaterialTheme.colorScheme.error,
+                            textAlign = TextAlign.Start
                         )
                     }
                 }
@@ -347,46 +367,67 @@ fun AccountScreen(
 
     if (showSignOutDialog) {
         AlertDialog(
-            onDismissRequest = { /* Strictly non-dismissible; only Cancel or Sign out may close. */ },
+            onDismissRequest = { /* Strictly non-dismissible; only Cancel or Log out may close. */ },
             properties = DialogProperties(
                 dismissOnBackPress = false,
                 dismissOnClickOutside = false
             ),
-            shape = RoundedCornerShape(24.dp),
+            shape = RoundedCornerShape(28.dp),
             containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            iconContentColor = MaterialTheme.colorScheme.error,
+            icon = {
+                Icon(
+                    imageVector = Icons.Rounded.Warning,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.error,
+                    modifier = Modifier
+                        .size(40.dp)
+                        .testTag("account_sign_out_warning_icon")
+                )
+            },
             title = {
                 Text(
-                    text = "Sign out",
-                    style = MaterialTheme.typography.titleLarge,
+                    text = "Log out?",
+                    fontSize = 22.sp,
+                    lineHeight = 33.sp,
                     fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.onSurface
+                    color = MaterialTheme.colorScheme.onSurface,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth()
                 )
             },
             text = {
                 Text(
-                    text = "This will sign you out and remove your Gemini API key from this device. You will need to add it again to use the app.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    text = "Your API key will be removed.",
+                    fontSize = 16.sp,
+                    lineHeight = 24.sp,
+                    fontWeight = FontWeight.Normal,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth()
                 )
             },
             confirmButton = {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     OutlinedButton(
                         onClick = { showSignOutDialog = false },
                         shape = CircleShape,
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
                         modifier = Modifier
                             .weight(1f)
-                            .heightIn(min = 44.dp)
+                            .heightIn(min = 48.dp)
                             .testTag("account_sign_out_cancel_button")
                     ) {
                         Text(
                             text = "Cancel",
                             fontSize = 14.sp,
+                            lineHeight = 21.sp,
                             fontWeight = FontWeight.SemiBold,
+                            textAlign = TextAlign.Center,
                             maxLines = 1,
                             softWrap = false
                         )
@@ -397,19 +438,22 @@ fun AccountScreen(
                             onDisconnectAccount()
                         },
                         shape = CircleShape,
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
                         colors = ButtonDefaults.buttonColors(
                             containerColor = MaterialTheme.colorScheme.error,
                             contentColor = MaterialTheme.colorScheme.onError
                         ),
                         modifier = Modifier
                             .weight(1f)
-                            .heightIn(min = 44.dp)
+                            .heightIn(min = 48.dp)
                             .testTag("account_sign_out_confirm_button")
                     ) {
                         Text(
-                            text = "Sign out",
+                            text = "Log out",
                             fontSize = 14.sp,
+                            lineHeight = 21.sp,
                             fontWeight = FontWeight.SemiBold,
+                            textAlign = TextAlign.Center,
                             maxLines = 1,
                             softWrap = false
                         )
@@ -482,9 +526,9 @@ fun UsageDetailsScreen(
 }
 
 /**
- * Dedicated full-screen Settings page opened from the Hamburger Drawer's `Settings` row.
- * Houses a shortcut to Daily Usage details, system permissions, Keep Rapcha Awake, and
- * Welcome tour replay — keeping the main Hamburger Drawer clean and uncluttered.
+ * Dedicated full-screen Settings page opened from the pinned bottom row in the Hamburger Drawer.
+ * Houses Controls (Smart mode, Voice ring, Always on, Color mode), Access (Draw over apps,
+ * Keyboard detector, Stay awake), and More (Usage, Tour) with visual-first rounded cards.
  */
 @Composable
 fun AppSettingsScreen(
@@ -498,9 +542,17 @@ fun AppSettingsScreen(
     onOpenWelcomeTour: () -> Unit,
     onSyncProfileAndLimits: () -> Unit,
     onOpenUsageDetails: () -> Unit = {},
+    onOpenDiagnostics: () -> Unit = {},
+    isSmartMode: Boolean = true,
+    onSmartModeToggle: (Boolean) -> Unit = {},
+    isBubbleEnabled: Boolean = false,
+    onBubbleToggle: (Boolean) -> Unit = {},
+    isAlwaysOnScreen: Boolean = false,
+    onAlwaysOnScreenToggle: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
-    val isLargeFont = LocalDensity.current.fontScale >= 1.55f
+    val context = LocalContext.current
+    val isDarkTheme by ThemeRepository.isDarkTheme.collectAsState()
 
     Column(
         modifier = modifier
@@ -525,117 +577,503 @@ fun AppSettingsScreen(
         ) {
             Spacer(modifier = Modifier.height(2.dp))
 
-            // Section 1: Daily usage shortcut (opens the single source-of-truth UsageDetailsScreen)
-            Column {
-                DrawerSectionHeading(title = "Usage")
-                SegmentedNavRow(
-                    icon = Icons.Rounded.BarChart,
-                    iconContainerColor = MaterialTheme.colorScheme.primaryContainer,
-                    iconContentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                    title = "Daily usage",
-                    subtitle = "View used count, remaining & reset time",
-                    selected = false,
-                    position = SegmentPosition.SINGLE,
-                    isLargeFont = isLargeFont,
-                    onClick = onOpenUsageDetails,
-                    testTag = "settings_usage_row"
+            // Group 1: Controls
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                SettingsGroupHeading(title = "Controls")
+                SettingsSwitchCardRow(
+                    icon = Icons.Rounded.AutoAwesome,
+                    label = "Smart mode",
+                    checked = isSmartMode,
+                    onCheckedChange = onSmartModeToggle,
+                    rowTestTag = "smart_mode_row",
+                    switchTestTag = "smart_mode_switch"
+                )
+                SettingsSwitchCardRow(
+                    icon = Icons.Rounded.TripOrigin,
+                    label = "Voice ring",
+                    checked = isBubbleEnabled,
+                    onCheckedChange = onBubbleToggle,
+                    rowTestTag = "floating_bubble_row",
+                    switchTestTag = "floating_bubble_switch"
+                )
+                SettingsSwitchCardRow(
+                    icon = Icons.Rounded.PushPin,
+                    label = "Always on",
+                    checked = isAlwaysOnScreen,
+                    onCheckedChange = onAlwaysOnScreenToggle,
+                    rowTestTag = "always_on_screen_row",
+                    switchTestTag = "always_on_screen_switch"
+                )
+                ColorModeCardRow(
+                    isDarkTheme = isDarkTheme,
+                    onSelectDarkTheme = { dark -> ThemeRepository.setDarkTheme(context, dark) }
                 )
             }
 
-            // Section 2: Android system permissions & background protection
-            Column {
-                DrawerSectionHeading(title = "System access")
-                Column(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalArrangement = Arrangement.spacedBy(3.dp)
-                ) {
-                    SegmentedPermissionRow(
-                        icon = Icons.Rounded.Layers,
-                        title = "Draw over other apps",
-                        granted = hasOverlayPermission,
-                        grantedText = "Permission granted",
-                        missingText = "Required for the floating voice ring",
-                        actionLabel = "Grant",
-                        position = SegmentPosition.TOP,
-                        isLargeFont = isLargeFont,
-                        onAction = onGrantOverlay,
-                        testTag = "settings_overlay_permission_row"
-                    )
-                    SegmentedPermissionRow(
-                        icon = Icons.Rounded.AccessibilityNew,
-                        title = "Keyboard & field detector",
-                        granted = isAccessibilityConnected,
-                        grantedText = "Service active",
-                        missingText = "Required to detect the focused field and type",
-                        actionLabel = "Turn on",
-                        position = SegmentPosition.MIDDLE,
-                        isLargeFont = isLargeFont,
-                        onAction = onTurnOnAccessibility,
-                        testTag = "settings_accessibility_permission_row"
-                    )
-                    SegmentedNavRow(
-                        icon = Icons.Rounded.Shield,
-                        iconContainerColor = if (keepAwakeNeedsFix) {
-                            MaterialTheme.colorScheme.errorContainer
-                        } else {
-                            MaterialTheme.colorScheme.primaryContainer
-                        },
-                        iconContentColor = if (keepAwakeNeedsFix) {
-                            MaterialTheme.colorScheme.onErrorContainer
-                        } else {
-                            MaterialTheme.colorScheme.onPrimaryContainer
-                        },
-                        title = "Keep Rapcha awake",
-                        subtitle = "Battery and background settings that keep the bubble alive",
-                        badgeText = if (keepAwakeNeedsFix) "Needs fix" else "Ready",
-                        badgeIcon = if (keepAwakeNeedsFix) Icons.Rounded.ErrorOutline else Icons.Rounded.Check,
-                        badgeContainerColor = if (keepAwakeNeedsFix) {
-                            MaterialTheme.colorScheme.errorContainer
-                        } else {
-                            MaterialTheme.colorScheme.primaryContainer
-                        },
-                        badgeContentColor = if (keepAwakeNeedsFix) {
-                            MaterialTheme.colorScheme.onErrorContainer
-                        } else {
-                            MaterialTheme.colorScheme.onPrimaryContainer
-                        },
-                        selected = false,
-                        position = SegmentPosition.BOTTOM,
-                        isLargeFont = isLargeFont,
-                        onClick = onOpenKeepAwake,
-                        testTag = "settings_keep_awake_row"
-                    )
-                }
+            // Group 2: Access
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                SettingsGroupHeading(title = "Access")
+                SettingsAccessCardRow(
+                    icon = Icons.Rounded.Layers,
+                    label = "Draw over apps",
+                    isGood = hasOverlayPermission,
+                    showChevron = false,
+                    onClick = if (hasOverlayPermission) null else onGrantOverlay,
+                    rowTestTag = "settings_overlay_permission_row",
+                    statusTestTag = "settings_overlay_status_icon"
+                )
+                SettingsAccessCardRow(
+                    icon = Icons.Rounded.AccessibilityNew,
+                    label = "Keyboard detector",
+                    isGood = isAccessibilityConnected,
+                    showChevron = false,
+                    onClick = if (isAccessibilityConnected) null else onTurnOnAccessibility,
+                    rowTestTag = "settings_accessibility_permission_row",
+                    statusTestTag = "settings_accessibility_status_icon"
+                )
+                SettingsAccessCardRow(
+                    icon = Icons.Rounded.Shield,
+                    label = "Stay awake",
+                    isGood = !keepAwakeNeedsFix,
+                    showChevron = true,
+                    onClick = onOpenKeepAwake,
+                    rowTestTag = "settings_keep_awake_row",
+                    statusTestTag = "settings_keep_awake_status_icon"
+                )
             }
 
-            // Section 3: Setup guide tucked neatly out of the main drawer
-            Column {
-                DrawerSectionHeading(title = "Setup")
-                SegmentedNavRow(
+            // Group 3: More
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                SettingsGroupHeading(title = "More")
+                SettingsNavCardRow(
+                    icon = Icons.Rounded.BarChart,
+                    iconContainerColor = MaterialTheme.colorScheme.primaryContainer,
+                    iconContentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                    label = "Usage",
+                    onClick = onOpenUsageDetails,
+                    testTag = "settings_usage_row"
+                )
+                SettingsNavCardRow(
+                    icon = Icons.Rounded.MonitorHeart,
+                    iconContainerColor = MaterialTheme.colorScheme.secondaryContainer,
+                    iconContentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                    label = "Diagnostics",
+                    onClick = onOpenDiagnostics,
+                    testTag = "settings_diagnostics_row"
+                )
+                SettingsNavCardRow(
                     icon = Icons.Rounded.Explore,
                     iconContainerColor = MaterialTheme.colorScheme.tertiaryContainer,
                     iconContentColor = MaterialTheme.colorScheme.onTertiaryContainer,
-                    title = "Welcome tour",
-                    subtitle = "Replay the quick onboarding setup guide",
-                    selected = false,
-                    position = SegmentPosition.SINGLE,
-                    isLargeFont = isLargeFont,
+                    label = "Tour",
                     onClick = onOpenWelcomeTour,
                     testTag = "settings_welcome_tour_row"
                 )
             }
 
-            // Clean version footer
+            // Version footer (normal lowercase, left-aligned, gray)
             Text(
-                text = "APP VERSION ${BuildConfig.VERSION_NAME.uppercase()}",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.65f),
+                text = "v ${BuildConfig.VERSION_NAME.lowercase(Locale.US)}",
+                fontSize = 16.sp,
+                lineHeight = 24.sp,
+                fontWeight = FontWeight.Normal,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Start,
                 modifier = Modifier
                     .padding(horizontal = 8.dp, vertical = 4.dp)
                     .testTag("settings_app_version")
             )
 
             Spacer(modifier = Modifier.height(24.dp))
+        }
+    }
+}
+
+@Composable
+private fun SettingsGroupHeading(title: String) {
+    Text(
+        text = title,
+        fontSize = 16.sp,
+        lineHeight = 24.sp,
+        fontWeight = FontWeight.SemiBold,
+        color = MaterialTheme.colorScheme.primary,
+        textAlign = TextAlign.Start,
+        modifier = Modifier
+            .padding(horizontal = 8.dp)
+            .semantics { heading() }
+    )
+}
+
+@Composable
+private fun SettingsSwitchCardRow(
+    icon: ImageVector,
+    label: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    rowTestTag: String,
+    switchTestTag: String
+) {
+    val iconBg by animateColorAsState(
+        targetValue = if (checked) {
+            MaterialTheme.colorScheme.primaryContainer
+        } else {
+            MaterialTheme.colorScheme.surfaceVariant
+        },
+        animationSpec = spring(dampingRatio = 1f, stiffness = 1600f),
+        label = "${rowTestTag}_icon_bg"
+    )
+    val iconFg by animateColorAsState(
+        targetValue = if (checked) {
+            MaterialTheme.colorScheme.onPrimaryContainer
+        } else {
+            MaterialTheme.colorScheme.onSurfaceVariant
+        },
+        animationSpec = spring(dampingRatio = 1f, stiffness = 1600f),
+        label = "${rowTestTag}_icon_fg"
+    )
+
+    Surface(
+        onClick = { onCheckedChange(!checked) },
+        shape = RoundedCornerShape(20.dp),
+        color = elevatedCardSurfaceColor(),
+        contentColor = MaterialTheme.colorScheme.onSurface,
+        border = elevatedCardBorder(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 64.dp)
+            .testTag(rowTestTag)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 64.dp)
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            TonalIconWell(
+                icon = icon,
+                containerColor = iconBg,
+                contentColor = iconFg
+            )
+            Text(
+                text = label,
+                fontSize = 16.sp,
+                lineHeight = 24.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface,
+                textAlign = TextAlign.Start,
+                modifier = Modifier.weight(1f)
+            )
+            ExpressiveSwitch(
+                checked = checked,
+                onCheckedChange = onCheckedChange,
+                testTag = switchTestTag
+            )
+        }
+    }
+}
+
+@Composable
+private fun ColorModeCardRow(
+    isDarkTheme: Boolean,
+    onSelectDarkTheme: (Boolean) -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(20.dp),
+        color = elevatedCardSurfaceColor(),
+        contentColor = MaterialTheme.colorScheme.onSurface,
+        border = elevatedCardBorder(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 64.dp)
+            .testTag("color_mode_row")
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 64.dp)
+                .padding(horizontal = 16.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            TonalIconWell(
+                icon = Icons.Rounded.DarkMode,
+                containerColor = MaterialTheme.colorScheme.primaryContainer,
+                contentColor = MaterialTheme.colorScheme.onPrimaryContainer
+            )
+            Text(
+                text = "Color mode",
+                fontSize = 16.sp,
+                lineHeight = 24.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface,
+                textAlign = TextAlign.Start,
+                modifier = Modifier.weight(1f)
+            )
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                PhoneThemePreviewTile(
+                    isDarkPreview = false,
+                    isSelected = !isDarkTheme,
+                    onClick = { onSelectDarkTheme(false) },
+                    testTag = "color_mode_light_tile"
+                )
+                PhoneThemePreviewTile(
+                    isDarkPreview = true,
+                    isSelected = isDarkTheme,
+                    onClick = { onSelectDarkTheme(true) },
+                    testTag = "color_mode_dark_tile"
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun PhoneThemePreviewTile(
+    isDarkPreview: Boolean,
+    isSelected: Boolean,
+    onClick: () -> Unit,
+    testTag: String
+) {
+    val tileShape = RoundedCornerShape(12.dp)
+    val screenBg = if (isDarkPreview) Color(0xFF0F1923) else Color(0xFFEAF1F8)
+    val cardBarColor = if (isDarkPreview) Color(0xFF243547) else Color.White
+    val notchColor = if (isDarkPreview) Color(0xFF3E5369) else Color(0xFFB8C7D9)
+    val borderColor = if (isSelected) {
+        MaterialTheme.colorScheme.primary
+    } else {
+        MaterialTheme.colorScheme.outlineVariant
+    }
+    val borderWidth = if (isSelected) 3.dp else 1.dp
+
+    Box(
+        modifier = Modifier
+            .size(width = 48.dp, height = 54.dp)
+            .clip(tileShape)
+            .background(screenBg)
+            .border(width = borderWidth, color = borderColor, shape = tileShape)
+            .clickable(onClick = onClick)
+            .semantics {
+                contentDescription = if (isDarkPreview) "Dark mode" else "Light mode"
+                role = Role.RadioButton
+                selected = isSelected
+            }
+            .testTag(testTag)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 6.dp, vertical = 6.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            // Mini phone status pill
+            Box(
+                modifier = Modifier
+                    .width(14.dp)
+                    .height(3.dp)
+                    .clip(CircleShape)
+                    .background(notchColor)
+            )
+            // Mini hero card preview
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(14.dp)
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(cardBarColor)
+            )
+            // Mini secondary row preview
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(10.dp)
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(cardBarColor)
+            )
+        }
+
+        if (isSelected) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(4.dp)
+                    .size(16.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.primary)
+                    .testTag("${testTag}_check"),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Check,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onPrimary,
+                    modifier = Modifier.size(11.dp)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SettingsAccessCardRow(
+    icon: ImageVector,
+    label: String,
+    isGood: Boolean,
+    showChevron: Boolean,
+    onClick: (() -> Unit)?,
+    rowTestTag: String,
+    statusTestTag: String
+) {
+    val cardShape = RoundedCornerShape(20.dp)
+    val surfaceModifier = Modifier
+        .fillMaxWidth()
+        .heightIn(min = 64.dp)
+        .testTag(rowTestTag)
+
+    val content: @Composable () -> Unit = {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 64.dp)
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            TonalIconWell(
+                icon = icon,
+                containerColor = MaterialTheme.colorScheme.primaryContainer,
+                contentColor = MaterialTheme.colorScheme.onPrimaryContainer
+            )
+            Text(
+                text = label,
+                fontSize = 16.sp,
+                lineHeight = 24.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface,
+                textAlign = TextAlign.Start,
+                modifier = Modifier.weight(1f)
+            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                AccessStatusBadge(
+                    isGood = isGood,
+                    testTag = statusTestTag
+                )
+                if (showChevron) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+            }
+        }
+    }
+
+    if (onClick != null) {
+        Surface(
+            onClick = onClick,
+            shape = cardShape,
+            color = elevatedCardSurfaceColor(),
+            contentColor = MaterialTheme.colorScheme.onSurface,
+            border = elevatedCardBorder(),
+            modifier = surfaceModifier,
+            content = content
+        )
+    } else {
+        Surface(
+            shape = cardShape,
+            color = elevatedCardSurfaceColor(),
+            contentColor = MaterialTheme.colorScheme.onSurface,
+            border = elevatedCardBorder(),
+            modifier = surfaceModifier,
+            content = content
+        )
+    }
+}
+
+@Composable
+private fun AccessStatusBadge(
+    isGood: Boolean,
+    testTag: String
+) {
+    val badgeColor = if (isGood) Color(0xFF16A34A) else Color(0xFFEA580C)
+    Box(
+        modifier = Modifier
+            .size(28.dp)
+            .clip(CircleShape)
+            .background(badgeColor)
+            .semantics {
+                contentDescription = if (isGood) "Active" else "Needs action"
+            }
+            .testTag(testTag),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(
+            imageVector = if (isGood) Icons.Rounded.Check else Icons.Rounded.PriorityHigh,
+            contentDescription = null,
+            tint = Color.White,
+            modifier = Modifier.size(16.dp)
+        )
+    }
+}
+
+@Composable
+private fun SettingsNavCardRow(
+    icon: ImageVector,
+    iconContainerColor: Color,
+    iconContentColor: Color,
+    label: String,
+    onClick: () -> Unit,
+    testTag: String
+) {
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(20.dp),
+        color = elevatedCardSurfaceColor(),
+        contentColor = MaterialTheme.colorScheme.onSurface,
+        border = elevatedCardBorder(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 64.dp)
+            .testTag(testTag)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 64.dp)
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            TonalIconWell(
+                icon = icon,
+                containerColor = iconContainerColor,
+                contentColor = iconContentColor
+            )
+            Text(
+                text = label,
+                fontSize = 16.sp,
+                lineHeight = 24.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface,
+                textAlign = TextAlign.Start,
+                modifier = Modifier.weight(1f)
+            )
+            Icon(
+                imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(20.dp)
+            )
         }
     }
 }

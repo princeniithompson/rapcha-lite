@@ -167,4 +167,87 @@ class SlowNetworkAndStreamingTest {
         assertEquals("Hello ", delta1)
         assertEquals("world!", delta2)
     }
+
+    @Test
+    fun `session audio backup aligns near-silent threshold with TranscriptAcceptance`() {
+        val ctx = RuntimeEnvironment.getApplication()
+        val backup = SessionAudioBackup(ctx)
+        backup.startNewSession()
+
+        // Ambient room noise (~240 peak, < 160 mean): previously triggered hasSpeech=true at >=200
+        // even though TranscriptAcceptance.isNearSilent dropped Live output, wasting batch quota.
+        backup.append(InterimPreviewMonitor.silencePcm(sampleCount = 1600))
+        backup.append(InterimPreviewMonitor.speechPcm(sample = 240, sampleCount = 1600))
+        assertFalse(backup.hasSpeech)
+        assertNull(backup.exportForFallback())
+
+        // Soft speech peaking above NEAR_SILENT_MAX (320) still counts as speech
+        backup.append(InterimPreviewMonitor.speechPcm(sample = 400, sampleCount = 1600))
+        assertTrue(backup.hasSpeech)
+
+        backup.cleanup()
+    }
+
+    @Test
+    fun `dictation telemetry repository tracks ring buffer, reason codes, report text, and clearAll`() {
+        val ctx = RuntimeEnvironment.getApplication()
+        val repo = com.princeniithompson.rapcha.diagnostics.DictationTelemetryRepository
+        repo.clearAll(ctx)
+
+        repeat(160) { i ->
+            val isFallback = i % 2 == 0
+            repo.recordSession(
+                context = ctx,
+                event = com.princeniithompson.rapcha.diagnostics.DictationTelemetryEvent(
+                    timestampMs = 1_700_000_000_000L + i * 1000L,
+                    outcome = if (isFallback) {
+                        com.princeniithompson.rapcha.diagnostics.DictationSessionOutcome.BATCH_FALLBACK
+                    } else {
+                        com.princeniithompson.rapcha.diagnostics.DictationSessionOutcome.LIVE_OK
+                    },
+                    reason = if (isFallback) {
+                        com.princeniithompson.rapcha.diagnostics.DictationFallbackReason.LIVE_TIMEOUT_WITH_PREVIEW
+                    } else {
+                        com.princeniithompson.rapcha.diagnostics.DictationFallbackReason.NONE_LIVE_OK
+                    },
+                    audioSec = 12,
+                    smartMode = true,
+                    tailMs = 120L,
+                    liveMs = if (isFallback) 5502L else 620L,
+                    liveTimeoutBudgetMs = 5500L,
+                    encodeMs = if (isFallback) 180L else 0L,
+                    batchMs = if (isFallback) 2900L else 0L,
+                    totalMs = if (isFallback) 8702L else 740L,
+                    hadPreview = true,
+                    socketState = "open",
+                    wsReconnects = 0,
+                    rmsMean = 900,
+                    rmsMax = 2400,
+                    batchMime = if (isFallback) "audio/mp4" else "none",
+                    batchBytes = if (isFallback) 24000 else 0,
+                    batchHttpCode = if (isFallback) 200 else 0,
+                    batchAttempts = if (isFallback) 1 else 0,
+                    networkType = "CELLULAR"
+                )
+            )
+        }
+
+        val snap = repo.snapshot.value
+        assertEquals(160, snap.totalSessions)
+        assertEquals(80, snap.liveOkCount)
+        assertEquals(80, snap.batchFallbackCount)
+        assertEquals(repo.MAX_EVENTS, snap.recentEvents.size)
+        assertEquals(
+            80,
+            snap.reasonCounts[com.princeniithompson.rapcha.diagnostics.DictationFallbackReason.LIVE_TIMEOUT_WITH_PREVIEW]
+        )
+
+        val report = repo.buildReportText(ctx)
+        assertTrue(report.contains("LIVE_TIMEOUT_WITH_PREVIEW: 80"))
+        assertTrue(report.contains("Zero dictated text is recorded"))
+
+        repo.clearAll(ctx)
+        assertEquals(0, repo.snapshot.value.totalSessions)
+        assertTrue(repo.snapshot.value.recentEvents.isEmpty())
+    }
 }

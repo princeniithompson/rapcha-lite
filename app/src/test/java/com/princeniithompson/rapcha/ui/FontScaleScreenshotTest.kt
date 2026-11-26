@@ -71,27 +71,22 @@ class FontScaleScreenshotTest {
     private fun settings(fontScale: Float, smart: Boolean = true, onToggle: (Boolean) -> Unit = {}) {
         show(fontScale) {
             var on by remember { mutableStateOf(smart) }
-            SettingsContent(
-                apiKey = "",
-                apiKeyConfigured = true,
-                signedInEmail = "",
-                isProvisioning = false,
-                vocabularyCount = 3,
-                dictionarySelected = false,
-                keepAwakeNeedsFix = true,
-                isBubbleEnabled = true,
+            com.princeniithompson.rapcha.ui.screens.AppSettingsScreen(
                 hasOverlayPermission = true,
                 isAccessibilityConnected = false,
-                onSaveApiKey = {},
-                onAutoGetWithGoogle = {},
-                onOpenWelcomeTour = {},
-                onOpenDictionary = {},
-                onOpenKeepAwake = {},
-                onBubbleToggle = {},
+                keepAwakeNeedsFix = true,
+                onBack = {},
                 onGrantOverlay = {},
                 onTurnOnAccessibility = {},
+                onOpenKeepAwake = {},
+                onOpenWelcomeTour = {},
+                onSyncProfileAndLimits = {},
                 isSmartMode = on,
-                onSmartModeToggle = { on = it; onToggle(it) }
+                onSmartModeToggle = { on = it; onToggle(it) },
+                isBubbleEnabled = true,
+                onBubbleToggle = {},
+                isAlwaysOnScreen = false,
+                onAlwaysOnScreenToggle = {}
             )
         }
     }
@@ -173,20 +168,25 @@ class FontScaleScreenshotTest {
     @Test fun home_mini_font_2_0() = homeMiniShots("2.0", 2.0f)
 
     @Test
-    fun home_mini_page_not_active_shows_use_button_and_choosing_marks_it_active() {
+    fun home_mini_page_not_active_shows_empty_circle_and_tapping_card_marks_it_active() {
         var chosen: BubbleChromeStyle? = null
         home(1.0f, BubbleChromeStyle.ORIGINAL, page = 1) { chosen = it }
         rule.onRoot().captureRoboImage("$shots/home_mini_bubble_choose_font_1.0.png")
-        rule.onNodeWithTag("bubble_use_mini").assertIsDisplayed().performClick()
+        rule.onNodeWithTag("bubble_unselected_mini").assertIsDisplayed()
+        rule.onNodeWithTag("bubble_page_mini").assertIsDisplayed().performClick()
         assertEquals(BubbleChromeStyle.COMPACT, chosen)
         rule.onNodeWithTag("bubble_active_mini").assertIsDisplayed()
     }
 
     @Test
-    fun home_tapping_bubble_preview_chooses_it() {
+    fun home_tapping_bubble_card_chooses_it_while_mock_buttons_do_nothing() {
         var chosen: BubbleChromeStyle? = null
         home(1.0f, BubbleChromeStyle.COMPACT, page = 0) { chosen = it }
-        rule.onNodeWithTag("bubble_preview_words").performClick()
+        rule.onNodeWithTag("words_cancel_button").performClick()
+        assertNull(chosen)
+        rule.onNodeWithTag("words_complete_button").performClick()
+        assertNull(chosen)
+        rule.onNodeWithTag("bubble_page_words").performClick()
         assertEquals(BubbleChromeStyle.ORIGINAL, chosen)
     }
 

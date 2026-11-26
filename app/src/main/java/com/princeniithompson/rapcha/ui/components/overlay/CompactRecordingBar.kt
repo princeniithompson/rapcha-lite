@@ -12,10 +12,13 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -35,6 +38,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -74,6 +78,7 @@ import com.princeniithompson.rapcha.R
 import com.princeniithompson.rapcha.service.floating.BubbleChromeGeometry
 import com.princeniithompson.rapcha.service.floating.SessionClockFormat
 import com.princeniithompson.rapcha.ui.components.renderGlowAnimation
+import kotlinx.coroutines.delay
 import kotlin.math.PI
 
 private val cachedNoiseImage: androidx.compose.ui.graphics.ImageBitmap by lazy {
@@ -116,6 +121,7 @@ fun CompactRecordingBar(
     onDragEnd: () -> Unit = {},
     bubbleVisible: Boolean = true,
     lowPower: Boolean = false,
+    staticPreview: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     // v23: animation values are read only inside draw/layer lambdas, so the pill redraws each
@@ -123,8 +129,8 @@ fun CompactRecordingBar(
     var phase1: () -> Float = { 0f }
     var phase2: () -> Float = { 0f }
     var spin: () -> Float = { 0f }
-    // v26: the glow only animates while the bubble is on screen (paused when hidden).
-    if (bubbleVisible) {
+    // v26: the glow only animates while the bubble is on screen (paused when hidden or static preview).
+    if (bubbleVisible && !staticPreview) {
         val infiniteTransition = rememberInfiniteTransition(label = "compact_pill_glow_anim")
         if (lowPower) {
             val animPhase1 = infiniteTransition.animateFloat(
@@ -206,9 +212,29 @@ fun CompactRecordingBar(
         horizontalArrangement = Arrangement.Center
     ) {
         // 1. Left: White 3D circular Cancel / X button (48dp diameter)
+        val cancelInteraction = remember { MutableInteractionSource() }
+        val cancelPressed by cancelInteraction.collectIsPressedAsState()
+        var cancelPulse by remember { mutableStateOf(false) }
+        LaunchedEffect(cancelPulse) {
+            if (cancelPulse) {
+                delay(100L)
+                cancelPulse = false
+            }
+        }
+        val cancelScale by animateFloatAsState(
+            targetValue = if (staticPreview && (cancelPressed || cancelPulse)) 0.97f else 1f,
+            animationSpec = tween(durationMillis = 100),
+            label = "compact_cancel_mock_scale"
+        )
         Box(
             modifier = Modifier
                 .size(cancelDiameter)
+                .graphicsLayer {
+                    if (staticPreview) {
+                        scaleX = cancelScale
+                        scaleY = cancelScale
+                    }
+                }
                 .shadow(
                     elevation = 4.dp,
                     shape = CircleShape,
@@ -222,7 +248,16 @@ fun CompactRecordingBar(
                     color = Color.Black.copy(alpha = 0.16f),
                     shape = CircleShape
                 )
-                .clickable(onClick = onCancel),
+                .clickable(
+                    interactionSource = cancelInteraction,
+                    indication = LocalIndication.current,
+                    onClick = {
+                        if (staticPreview) {
+                            cancelPulse = true
+                        }
+                        onCancel()
+                    }
+                ),
             contentAlignment = Alignment.Center
         ) {
             Icon(
@@ -257,16 +292,22 @@ fun CompactRecordingBar(
                     ),
                     shape = pillShape
                 )
-                .pointerInput(Unit) {
-                    detectDragGestures(
-                        onDragStart = { onDragStart() },
-                        onDragEnd = { onDragEnd() },
-                        onDragCancel = { onDragEnd() }
-                    ) { change, drag ->
-                        change.consume()
-                        onDrag(drag.x, drag.y)
+                .then(
+                    if (staticPreview) {
+                        Modifier
+                    } else {
+                        Modifier.pointerInput(Unit) {
+                            detectDragGestures(
+                                onDragStart = { onDragStart() },
+                                onDragEnd = { onDragEnd() },
+                                onDragCancel = { onDragEnd() }
+                            ) { change, drag ->
+                                change.consume()
+                                onDrag(drag.x, drag.y)
+                            }
+                        }
                     }
-                },
+                ),
             contentAlignment = Alignment.Center
         ) {
             // Layer B: Blurred Glow Layer from Engine (with Android 12+ RenderEffect blur & pre-blurred low-power fallback)
@@ -478,11 +519,40 @@ fun CompactRecordingBar(
         Spacer(modifier = Modifier.width(gap))
 
         // 3. Right: Circular Lifebuoy Complete Button (48dp diameter, hollow center)
+        val completeInteraction = remember { MutableInteractionSource() }
+        val completePressed by completeInteraction.collectIsPressedAsState()
+        var completePulse by remember { mutableStateOf(false) }
+        LaunchedEffect(completePulse) {
+            if (completePulse) {
+                delay(100L)
+                completePulse = false
+            }
+        }
+        val completeScale by animateFloatAsState(
+            targetValue = if (staticPreview && (completePressed || completePulse)) 0.97f else 1f,
+            animationSpec = tween(durationMillis = 100),
+            label = "compact_complete_mock_scale"
+        )
         Box(
             modifier = Modifier
                 .size(completeDiameter)
+                .graphicsLayer {
+                    if (staticPreview) {
+                        scaleX = completeScale
+                        scaleY = completeScale
+                    }
+                }
                 .clip(CircleShape)
-                .clickable(onClick = onComplete)
+                .clickable(
+                    interactionSource = completeInteraction,
+                    indication = LocalIndication.current,
+                    onClick = {
+                        if (staticPreview) {
+                            completePulse = true
+                        }
+                        onComplete()
+                    }
+                )
                 .testTag("compact_bar_complete_button"),
             contentAlignment = Alignment.Center
         ) {
@@ -491,7 +561,7 @@ fun CompactRecordingBar(
                 contentDescription = "Complete",
                 modifier = Modifier
                     .size(completeDiameter)
-                    .graphicsLayer { if (processing) rotationZ = spin() }
+                    .graphicsLayer { if (!staticPreview && processing) rotationZ = spin() }
             )
         }
     }

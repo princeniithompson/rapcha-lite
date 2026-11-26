@@ -111,6 +111,12 @@ object GeminiBatchTranscribeClient {
         }
     }
 
+    data class BatchTranscribeResult(
+        val text: String?,
+        val lastHttpCode: Int,
+        val attempts: Int
+    )
+
     /**
      * Uploads [audioBytes] (`audio/mp4` or `audio/wav`) to `gemini-3.5-transcribe` and returns the
      * transcribed text, or `null` if the request fails after retries.
@@ -122,8 +128,30 @@ object GeminiBatchTranscribeClient {
         smartMode: Boolean,
         customVocabulary: List<String>
     ): String? {
+        return transcribeDetailed(
+            apiKey = apiKey,
+            audioBytes = audioBytes,
+            mimeType = mimeType,
+            smartMode = smartMode,
+            customVocabulary = customVocabulary
+        ).text
+    }
+
+    /**
+     * Same as [transcribe], also returning the final HTTP status code and attempt count for
+     * release-safe diagnostics.
+     */
+    suspend fun transcribeDetailed(
+        apiKey: String,
+        audioBytes: ByteArray,
+        mimeType: String,
+        smartMode: Boolean,
+        customVocabulary: List<String>
+    ): BatchTranscribeResult {
         val key = apiKey.trim()
-        if (ApiConfig.isPlaceholder(key) || audioBytes.isEmpty()) return null
+        if (ApiConfig.isPlaceholder(key) || audioBytes.isEmpty()) {
+            return BatchTranscribeResult(text = null, lastHttpCode = 0, attempts = 0)
+        }
 
         val url = ApiConfig.geminiGenerateContentUrl(MODEL)
         val bodyJson = buildRequestBodyJson(
@@ -134,27 +162,32 @@ object GeminiBatchTranscribeClient {
         )
 
         return withContext(Dispatchers.IO) {
+            var lastCode = 0
+            var attemptsRun = 0
             for (attempt in 1..MAX_ATTEMPTS) {
+                attemptsRun = attempt
                 try {
                     val (code, body) = executeHttp(url, key, bodyJson)
+                    lastCode = code
                     com.princeniithompson.rapcha.data.ApiUsageRepository.recordOfflinePushCall(code)
                     if (code in 200..299) {
                         val parsed = parseResponseText(body)
                         Log.i(TAG, "Batch fallback succeeded on attempt $attempt (mime=$mimeType, bytes=${audioBytes.size}, chars=${parsed?.length ?: 0})")
-                        return@withContext parsed
+                        return@withContext BatchTranscribeResult(text = parsed, lastHttpCode = code, attempts = attempt)
                     }
                     Log.w(TAG, "Batch fallback HTTP $code on attempt $attempt")
                     if (code == 400 || code == 401 || code == 403 || code == 404) {
-                        return@withContext null
+                        return@withContext BatchTranscribeResult(text = null, lastHttpCode = code, attempts = attempt)
                     }
                 } catch (t: Throwable) {
+                    lastCode = 0
                     Log.w(TAG, "Batch fallback attempt $attempt failed: ${t.javaClass.simpleName}: ${t.message}")
                 }
                 if (attempt < MAX_ATTEMPTS) {
                     delay(RETRY_DELAY_MS)
                 }
             }
-            null
+            BatchTranscribeResult(text = null, lastHttpCode = lastCode, attempts = attemptsRun)
         }
     }
 

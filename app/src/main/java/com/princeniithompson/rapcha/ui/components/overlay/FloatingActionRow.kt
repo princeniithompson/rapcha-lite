@@ -1,8 +1,13 @@
 package com.princeniithompson.rapcha.ui.components.overlay
 
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
@@ -19,6 +24,11 @@ import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -35,6 +45,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.princeniithompson.rapcha.service.floating.SessionClockFormat
 
+import kotlinx.coroutines.delay
+
 @Composable
 fun PillActionButton(
     onClick: () -> Unit,
@@ -42,11 +54,32 @@ fun PillActionButton(
     borderColor: Color,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
+    mockPressFeedback: Boolean = false,
     content: @Composable () -> Unit
 ) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+    var tapPulse by remember { mutableStateOf(false) }
+    LaunchedEffect(tapPulse) {
+        if (tapPulse) {
+            delay(100L)
+            tapPulse = false
+        }
+    }
+    val pressScale by animateFloatAsState(
+        targetValue = if (mockPressFeedback && (isPressed || tapPulse)) 0.97f else 1f,
+        animationSpec = tween(durationMillis = 100),
+        label = "pill_mock_press_scale"
+    )
     Box(
         modifier = modifier
             .height(34.dp)
+            .graphicsLayer {
+                if (mockPressFeedback) {
+                    scaleX = pressScale
+                    scaleY = pressScale
+                }
+            }
             .clip(CircleShape)
             .background(backgroundColor)
             .then(
@@ -54,7 +87,17 @@ fun PillActionButton(
                     Modifier.border(0.9.dp, borderColor, CircleShape)
                 } else Modifier
             )
-            .clickable(enabled = enabled, onClick = onClick),
+            .clickable(
+                interactionSource = interactionSource,
+                indication = LocalIndication.current,
+                enabled = enabled,
+                onClick = {
+                    if (mockPressFeedback) {
+                        tapPulse = true
+                    }
+                    onClick()
+                }
+            ),
         contentAlignment = Alignment.Center
     ) {
         content()
@@ -133,7 +176,8 @@ fun FloatingActionRow(
     showPolish: Boolean = false,
     elapsedSeconds: Int = 0,
     isNetworkProblem: Boolean = false,
-    blinkAlphaProvider: () -> Float = { 1f }
+    blinkAlphaProvider: () -> Float = { 1f },
+    mockPressFeedback: Boolean = false
 ) {
     val onAccentColor = if (isColorDark(palette.primaryVibrant)) Color.White else Color(0xFF042F2E)
 
@@ -148,6 +192,7 @@ fun FloatingActionRow(
             backgroundColor = Color(0x5C0E1417),
             borderColor = Color(0x30FFFFFF),
             enabled = !isFinalizing && !isPolishing,
+            mockPressFeedback = mockPressFeedback,
             modifier = Modifier
                 .weight(if (showPolish) 0.95f else 1f)
                 .testTag("words_cancel_button")
@@ -189,6 +234,7 @@ fun FloatingActionRow(
             backgroundColor = Color(0x2BFFFFFF),
             borderColor = Color(0x30FFFFFF),
             enabled = !isPolishing && !isFinalizing,
+            mockPressFeedback = mockPressFeedback,
             modifier = Modifier.weight(1f)
         ) {
             Row(
@@ -230,6 +276,7 @@ fun FloatingActionRow(
             backgroundColor = if (isFinalizing) palette.primaryVibrant.copy(alpha = 0.86f) else palette.primaryVibrant,
             borderColor = Color(0x36FFFFFF),
             enabled = !isFinalizing && !isPolishing,
+            mockPressFeedback = mockPressFeedback,
             modifier = Modifier
                 .weight(if (showPolish) 1.15f else 1.12f)
                 .testTag("words_complete_button")

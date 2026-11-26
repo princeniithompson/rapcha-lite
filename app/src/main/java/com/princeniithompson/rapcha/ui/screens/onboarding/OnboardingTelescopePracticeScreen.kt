@@ -38,7 +38,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
-import androidx.compose.material.icons.rounded.AutoFixHigh
+import com.princeniithompson.rapcha.ui.components.RapchaIcons
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -853,7 +853,7 @@ fun OnboardingTelescopePracticeScreen(
                         modifier = Modifier.testTag("btn_telescope_tap_try")
                     ) {
                         Icon(
-                            imageVector = Icons.Rounded.AutoFixHigh,
+                            imageVector = RapchaIcons.Modules,
                             contentDescription = null,
                             modifier = Modifier.size(16.dp)
                         )
